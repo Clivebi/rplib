@@ -2,6 +2,7 @@ package main
 
 import (
 	"flag"
+	"log"
 	"net/http"
 	_ "net/http/pprof"
 	"time"
@@ -20,5 +21,14 @@ func main() {
 		flag.Usage()
 		return
 	}
-	rplib.RunRouteServer(*routeAddress, *backendAddress, time.Minute*4)
+	for {
+		log.Println("try connect to " + *routeAddress)
+		ap, err := rplib.NewAP(*routeAddress, *backendAddress, time.Minute*4)
+		if err != nil {
+			time.Sleep(time.Second * 30)
+			continue
+		}
+		log.Println("connect " + *routeAddress + " success")
+		ap.Run()
+	}
 }

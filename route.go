@@ -302,22 +302,22 @@ func (o *RouteConnection) AllocateStream(timeout time.Duration) (stream *RouteSt
 	return
 }
 
-type Route struct {
+type APGroup struct {
 	lock  sync.RWMutex
 	conns map[string]*RouteConnection
 }
 
-func NewRoute() *Route {
-	return &Route{lock: sync.RWMutex{}, conns: map[string]*RouteConnection{}}
+func NewAPGroup() *APGroup {
+	return &APGroup{lock: sync.RWMutex{}, conns: map[string]*RouteConnection{}}
 }
 
-func (o *Route) lookupConnection(key string) *RouteConnection {
+func (o *APGroup) lookupConnection(key string) *RouteConnection {
 	o.lock.Lock()
 	defer o.lock.Unlock()
 	return o.conns[key]
 }
 
-func (o *Route) pickupConnection() *RouteConnection {
+func (o *APGroup) pickupConnection() *RouteConnection {
 	index := (int)(time.Now().UnixNano() & 0xFFFFFF)
 	o.lock.Lock()
 	defer o.lock.Unlock()
@@ -331,7 +331,7 @@ func (o *Route) pickupConnection() *RouteConnection {
 	return list[index%size]
 }
 
-func (o *Route) removeConnection(key string) *RouteConnection {
+func (o *APGroup) removeConnection(key string) *RouteConnection {
 	o.lock.Lock()
 	defer o.lock.Unlock()
 	con := o.conns[key]
@@ -339,7 +339,7 @@ func (o *Route) removeConnection(key string) *RouteConnection {
 	return con
 }
 
-func (o *Route) serverNewConnection(con net.Conn, expireTimeout time.Duration, key string) {
+func (o *APGroup) serverNewConnection(con net.Conn, expireTimeout time.Duration, key string) {
 	old := o.removeConnection(key)
 	if old != nil {
 		old.Close()
@@ -355,10 +355,233 @@ func (o *Route) serverNewConnection(con net.Conn, expireTimeout time.Duration, k
 	rc.Close()
 }
 
-func (o *Route) AllocateStream(key string, timeout time.Duration) (*RouteStream, error) {
+func (o *APGroup) AllocateStream(key string, timeout time.Duration) (*RouteStream, error) {
 	rc := o.lookupConnection(key)
 	if rc == nil {
 		return nil, errors.New("RouteConnection not exist for key:" + key)
 	}
 	return rc.AllocateStream(timeout)
+}
+
+type clientContext struct {
+	addr       string
+	conn       net.Conn
+	activeTime time.Time
+	sendBytes  int64
+	recvBytes  int64
+	sendSpeed  int64
+	recvSpeed  int64
+}
+
+type RouteHijack interface {
+	//SelectRouteConnection
+	//called when new client connection accept
+	SelectRouteConnection(*Route, net.Conn) (*RouteConnection, error)
+	//GetRouteConnectionKey
+	//called when new route server connection accept
+	GetRouteConnectionKey(*Route, net.Conn) (string, error)
+}
+
+type Route struct {
+	//ServerAddress the address accept client connection
+	ServerAddress string
+	//RouteAddress the address accept RouteServer connection
+	RouteAddress string
+	//ReadTimeoutSecond
+	//the first packet read time out maybe a auth packet
+	ReadTimeoutSecond int
+	//ClientExpireTimeoutSecond
+	//the client connection expire timeout,
+	//if in this timeout not have any traffic,close the connection
+	ClientExpireTimeoutSecond int
+	//ServerExpireTimeoutSecond
+	//the route connection expire timeout,
+	//if in this timeout not have any traffic,close the connection
+	ServerExpireTimeoutSecond int
+	route                     *APGroup
+	clientsLock               sync.RWMutex
+	clients                   map[string]*clientContext
+	hijack                    RouteHijack
+	serverListener            net.Listener
+	routeListener             net.Listener
+	exit                      chan int
+}
+
+func (o *Route) Hijack(h RouteHijack) *Route {
+	o.hijack = h
+	return o
+}
+
+func (o *Route) expireTimeoutBackgroundThread() {
+	ticker := time.NewTicker(time.Duration(o.ClientExpireTimeoutSecond/2) * time.Second)
+	for {
+		select {
+		case <-o.exit:
+			ticker.Stop()
+			return
+		case <-ticker.C:
+			now := time.Now()
+			o.clientsLock.Lock()
+			for k, v := range o.clients {
+				if now.After(v.activeTime) && now.Sub(v.activeTime) > time.Duration(o.ClientExpireTimeoutSecond)*time.Second {
+					v.conn.Close()
+					delete(o.clients, k)
+				}
+				v.sendSpeed = 0
+				v.recvSpeed = 0
+			}
+			o.clientsLock.Unlock()
+
+		}
+	}
+}
+
+func (o *Route) addClientConnection(ctx *clientContext) {
+	o.clientsLock.Lock()
+	defer o.clientsLock.Unlock()
+	ctx.addr = ctx.conn.RemoteAddr().String()
+	o.clients[ctx.addr] = ctx
+}
+
+func (o *Route) removeClientConnection(ctx *clientContext) {
+	o.clientsLock.Lock()
+	defer o.clientsLock.Unlock()
+	delete(o.clients, ctx.addr)
+}
+
+func (o *Route) copyIO(dst io.Writer, src io.Reader, ctx *clientContext, send bool) {
+	buf := make([]byte, 1024*32)
+	for {
+		n, err := src.Read(buf)
+		if err != nil {
+			break
+		}
+		_, err = dst.Write(buf[:n])
+		if err != nil {
+			break
+		}
+		if send {
+			ctx.sendSpeed += int64(n)
+			ctx.sendBytes += int64(n)
+		} else {
+			ctx.recvSpeed += int64(n)
+			ctx.recvBytes += int64(n)
+		}
+		ctx.activeTime = time.Now()
+	}
+}
+
+func (o *Route) serveClient() error {
+	var err error
+	o.serverListener, err = net.Listen("tcp", o.ServerAddress)
+	if err != nil {
+		return err
+	}
+	defer o.Close()
+	for {
+		con, err := o.serverListener.Accept()
+		if err != nil {
+			return err
+		}
+		go o.serverConnectionHandler(con)
+	}
+}
+
+func (o *Route) serveAP() error {
+	var err error
+	o.routeListener, err = net.Listen("tcp", o.RouteAddress)
+	if err != nil {
+		return err
+	}
+	defer o.Close()
+	for {
+		con, err := o.routeListener.Accept()
+		if err != nil {
+			return err
+		}
+		go o.routeConnectionHandler(con)
+	}
+}
+
+func (o *Route) selectRouteConnection(con net.Conn) (*RouteConnection, error) {
+	if o.hijack != nil {
+		return o.hijack.SelectRouteConnection(o, con)
+	}
+	rc := o.route.pickupConnection()
+	if rc == nil {
+		return nil, errors.New("not routeconnection avaliable")
+	}
+	return rc, nil
+}
+
+func (o *Route) getRouteConnectionKey(con net.Conn) (string, error) {
+	if o.hijack != nil {
+		return o.hijack.GetRouteConnectionKey(o, con)
+	}
+	return con.RemoteAddr().String(), nil
+}
+
+func (o *Route) routeConnectionHandler(con net.Conn) {
+	key, err := o.getRouteConnectionKey(con)
+	if err != nil {
+		log.Println("get routeconnection key failed:", err)
+		con.Close()
+		return
+	}
+	o.route.serverNewConnection(con, time.Duration(o.ServerExpireTimeoutSecond)*time.Second, key)
+}
+
+func (o *Route) serverConnectionHandler(con net.Conn) {
+	defer con.Close()
+	rc, err := o.selectRouteConnection(con)
+	if err != nil {
+		log.Println("select routeconnect failed:", err)
+		return
+	}
+	rs, err := rc.AllocateStream(time.Minute)
+	if err != nil {
+		log.Println("allocate stream failed:", err)
+		return
+	}
+	defer rs.Close()
+	ctx := &clientContext{activeTime: time.Now()}
+	ctx.conn = con
+	o.addClientConnection(ctx)
+	go o.copyIO(con, rs, ctx, false)
+	o.copyIO(rs, con, ctx, true)
+	o.removeClientConnection(ctx)
+}
+
+func (o *Route) Close() error {
+	if o.serverListener != nil {
+		o.serverListener.Close()
+		o.serverListener = nil
+	}
+	if o.routeListener != nil {
+		o.routeListener.Close()
+	}
+	return nil
+}
+
+func (o *Route) Run() {
+	o.route = NewAPGroup()
+	o.clientsLock = sync.RWMutex{}
+	o.clients = map[string]*clientContext{}
+	o.exit = make(chan int)
+	go o.expireTimeoutBackgroundThread()
+	wg := sync.WaitGroup{}
+	wg.Add(2)
+	go func() {
+		o.serveClient()
+		o.Close()
+		wg.Done()
+	}()
+	go func() {
+		o.serveAP()
+		o.Close()
+		wg.Done()
+	}()
+	wg.Wait()
+	close(o.exit)
+	return
 }

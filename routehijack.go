@@ -24,7 +24,7 @@ import (
 type IPWithAddressHeaderHijack struct {
 }
 
-func (h *IPWithAddressHeaderHijack) SelectRouteConnection(o *BasicRoute, con net.Conn) (*RouteConnection, error) {
+func (h *IPWithAddressHeaderHijack) SelectRouteConnection(o *Route, con net.Conn) (*RouteConnection, error) {
 	con.SetReadDeadline(time.Now().Add(time.Duration(o.ReadTimeoutSecond) * time.Second))
 	ipV4 := make([]byte, 4)
 	_, err := con.Read(ipV4)
@@ -42,7 +42,7 @@ func (h *IPWithAddressHeaderHijack) SelectRouteConnection(o *BasicRoute, con net
 	return rc, nil
 }
 
-func (h *IPWithAddressHeaderHijack) GetRouteConnectionKey(o *BasicRoute, con net.Conn) (string, error) {
+func (h *IPWithAddressHeaderHijack) GetRouteConnectionKey(o *Route, con net.Conn) (string, error) {
 	key, _, _ := net.SplitHostPort(con.RemoteAddr().String())
 	return key, nil
 }
@@ -105,7 +105,7 @@ func (h *IPWithPolicyHijack) LookupDestAddress(ip net.IP) (string, error) {
 	return "", errors.New("policy not found for " + ip.String())
 }
 
-func (h *IPWithPolicyHijack) SelectRouteConnection(o *BasicRoute, con net.Conn) (*RouteConnection, error) {
+func (h *IPWithPolicyHijack) SelectRouteConnection(o *Route, con net.Conn) (*RouteConnection, error) {
 	srcAddress, _, _ := net.SplitHostPort(con.RemoteAddr().String())
 	address := net.ParseIP(srcAddress)
 	key, err := h.LookupDestAddress(address)
@@ -120,7 +120,7 @@ func (h *IPWithPolicyHijack) SelectRouteConnection(o *BasicRoute, con net.Conn) 
 	return rc, nil
 }
 
-func (h *IPWithPolicyHijack) GetRouteConnectionKey(o *BasicRoute, con net.Conn) (string, error) {
+func (h *IPWithPolicyHijack) GetRouteConnectionKey(o *Route, con net.Conn) (string, error) {
 	key, _, _ := net.SplitHostPort(con.RemoteAddr().String())
 	return key, nil
 }

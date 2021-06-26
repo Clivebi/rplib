@@ -12,7 +12,7 @@ type CommandWriter interface {
 	AsyncWriteCommand(cmd Command)
 }
 
-type RouteServerStream struct {
+type APStream struct {
 	isClosed      bool
 	id            uint16
 	backend       net.Conn
@@ -20,7 +20,7 @@ type RouteServerStream struct {
 	commandWriter CommandWriter
 }
 
-func (o *RouteServerStream) Close() {
+func (o *APStream) Close() {
 	if o.isClosed {
 		return
 	}
@@ -29,7 +29,7 @@ func (o *RouteServerStream) Close() {
 	close(o.w)
 }
 
-func (o *RouteServerStream) exception(err error) {
+func (o *APStream) exception(err error) {
 	if o.isClosed {
 		return
 	}
@@ -37,7 +37,7 @@ func (o *RouteServerStream) exception(err error) {
 	o.commandWriter.AsyncWriteCommand(cmd)
 }
 
-func (o *RouteServerStream) dataArrived(data []byte) {
+func (o *APStream) dataArrived(data []byte) {
 	if o.isClosed {
 		return
 	}
@@ -45,7 +45,7 @@ func (o *RouteServerStream) dataArrived(data []byte) {
 	o.commandWriter.AsyncWriteCommand(cmd)
 }
 
-func (o *RouteServerStream) writeLoop() {
+func (o *APStream) writeLoop() {
 	for {
 		data := <-o.w
 		if data == nil {
@@ -59,7 +59,7 @@ func (o *RouteServerStream) writeLoop() {
 	}
 }
 
-func (o *RouteServerStream) readLoop() {
+func (o *APStream) readLoop() {
 	cache_size := MaxPacketSize - payloadOffset
 	for {
 		buf := make([]byte, cache_size)
@@ -72,18 +72,18 @@ func (o *RouteServerStream) readLoop() {
 	}
 }
 
-type RouteServer struct {
+type AP struct {
 	AliveTick    time.Duration
 	conn         net.Conn
 	nextStreamID uint16
 	lock         sync.RWMutex
-	streams      map[uint16]*RouteServerStream
+	streams      map[uint16]*APStream
 	backendAddr  string
 	wCmd         chan Command
 	rCmd         chan Command
 }
 
-func (o *RouteServer) Close() error {
+func (o *AP) Close() error {
 	//step 1 raise readloop exit
 	//step 2 shutdown all stream
 	//step 3 raise processLoop exit
@@ -93,14 +93,14 @@ func (o *RouteServer) Close() error {
 	for _, v := range o.streams {
 		v.Close()
 	}
-	o.streams = map[uint16]*RouteServerStream{}
+	o.streams = map[uint16]*APStream{}
 	o.lock.Unlock()
 	close(o.rCmd)
 	close(o.wCmd)
 	return nil
 }
 
-func (o *RouteServer) processLoop() {
+func (o *AP) processLoop() {
 	for {
 		cmd := <-o.rCmd
 		if cmd == nil {
@@ -111,14 +111,14 @@ func (o *RouteServer) processLoop() {
 	}
 }
 
-func (o *RouteServer) processConnect(cmd Command, id uint16) {
+func (o *AP) processConnect(cmd Command, id uint16) {
 	backendConn, err := net.Dial("tcp", o.backendAddr)
 	if err != nil {
 		rsp := ConnectResponseCommand(cmd.Payload(), 0, 1)
 		o.AsyncWriteCommand(rsp)
 		return
 	}
-	stream := &RouteServerStream{
+	stream := &APStream{
 		id:            id,
 		backend:       backendConn,
 		w:             make(chan []byte, 64),
@@ -135,13 +135,13 @@ func (o *RouteServer) processConnect(cmd Command, id uint16) {
 	stream.writeLoop()
 }
 
-func (o *RouteServer) lookupStream(id uint16) *RouteServerStream {
+func (o *AP) lookupStream(id uint16) *APStream {
 	o.lock.RLock()
 	defer o.lock.RUnlock()
 	return o.streams[id]
 }
 
-func (o *RouteServer) processCommand(cmd Command) {
+func (o *AP) processCommand(cmd Command) {
 	switch cmd.Type() {
 	case CommandConnect:
 		id := o.nextStreamID
@@ -168,7 +168,7 @@ func (o *RouteServer) processCommand(cmd Command) {
 	}
 }
 
-func (o *RouteServer) readLoop() {
+func (o *AP) readLoop() {
 	for {
 		buf := make([]byte, MaxPacketSize)
 		n, err := o.conn.Read(buf[:2])
@@ -191,7 +191,7 @@ func (o *RouteServer) readLoop() {
 	}
 }
 
-func (o *RouteServer) writeLoop() {
+func (o *AP) writeLoop() {
 	ticker := time.NewTicker(o.AliveTick)
 	defer ticker.Stop()
 	for {
@@ -217,32 +217,30 @@ func (o *RouteServer) writeLoop() {
 	}
 }
 
-func (o *RouteServer) AsyncWriteCommand(cmd Command) {
+func (o *AP) AsyncWriteCommand(cmd Command) {
 	o.wCmd <- cmd
 }
 
-func RunRouteServer(routeAddress string, backendAddress string, aliveTick time.Duration) {
-	for {
-		log.Println("try connect to ", routeAddress)
-		con, err := net.Dial("tcp4", routeAddress)
-		if err != nil {
-			time.Sleep(time.Second * 30)
-			continue
-		}
-		log.Println("connect " + routeAddress + " success")
-		s := &RouteServer{
-			AliveTick:    aliveTick,
-			conn:         con,
-			nextStreamID: uint16(time.Now().Unix() & 0xFFF),
-			lock:         sync.RWMutex{},
-			streams:      map[uint16]*RouteServerStream{},
-			backendAddr:  backendAddress,
-			wCmd:         make(chan Command, 1024),
-			rCmd:         make(chan Command, 1024),
-		}
-		go s.processLoop()
-		go s.writeLoop()
-		s.readLoop()
-		s.Close()
+func (o *AP) Run() {
+	go o.processLoop()
+	go o.writeLoop()
+	o.readLoop()
+}
+
+func NewAP(routeAddress string, backendAddress string, aliveTick time.Duration) (*AP, error) {
+	con, err := net.Dial("tcp4", routeAddress)
+	if err != nil {
+		return nil, err
 	}
+	s := &AP{
+		AliveTick:    aliveTick,
+		conn:         con,
+		nextStreamID: uint16(time.Now().Unix() & 0xFFF),
+		lock:         sync.RWMutex{},
+		streams:      map[uint16]*APStream{},
+		backendAddr:  backendAddress,
+		wCmd:         make(chan Command, 1024),
+		rCmd:         make(chan Command, 1024),
+	}
+	return s, nil
 }

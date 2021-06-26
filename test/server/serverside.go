@@ -2,7 +2,6 @@ package main
 
 import (
 	"flag"
-	"fmt"
 	"net/http"
 	_ "net/http/pprof"
 
@@ -27,7 +26,7 @@ func main() {
 		flag.Usage()
 		return
 	}
-	route := rplib.BasicRoute{}
+	route := rplib.Route{}
 	route.ServerAddress = *serverAddress
 	route.RouteAddress = *routeAddress
 	route.ClientExpireTimeoutSecond = *clientExpireTimeout
@@ -36,5 +35,5 @@ func main() {
 	if *multiMode {
 		route.Hijack(&rplib.IPWithAddressHeaderHijack{})
 	}
-	fmt.Println(route.StartRoute())
+	route.Run()
 }
