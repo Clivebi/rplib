@@ -84,6 +84,7 @@ func (o *RouteAPStream) Write(b []byte) (int, error) {
 func (o *RouteAPStream) close(sendException bool) {
 	o.lock.Lock()
 	if o.isClosed {
+		o.lock.Unlock()
 		return
 	}
 	o.isClosed = true
@@ -478,8 +479,9 @@ func (o *Route) removeClientConnection(ctx *ClientContext) {
 	delete(o.clients, ctx.addr)
 }
 
-func (o *Route) copyIO(dst io.Writer, src io.Reader, ctx *ClientContext, send bool) {
+func (o *Route) copyIO(dst io.WriteCloser, src io.ReadCloser, ctx *ClientContext, send bool) {
 	buf := make([]byte, 1024*32)
+	defer dst.Close()
 	for {
 		n, err := src.Read(buf)
 		if err != nil {
@@ -565,14 +567,15 @@ func (o *Route) serverConnectionHandler(con net.Conn) {
 	rc, err := o.selectRouteConnection(con)
 	if err != nil {
 		log.Println("select routeconnect failed:", err)
+		con.Close()
 		return
 	}
 	rs, err := rc.AllocateStream(time.Minute)
 	if err != nil {
 		log.Println("allocate stream failed:", err)
+		con.Close()
 		return
 	}
-	defer rs.Close()
 	ctx := &ClientContext{ActiveTime: time.Now()}
 	ctx.conn = con
 	o.addClientConnection(ctx)
