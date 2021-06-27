@@ -11,20 +11,19 @@ import (
 //IPWithAddressHeaderHijack implement ip address(IPv4) header protocol
 //the client must send the route server address before normal traffic
 //example:
-/*
-	ip := net.ParseIP("127.0.0.1").To4()
-	con, err := net.Dial("tcp", "localhost:9000")
-	if err != nil {
-		t.Error(err)
-		return
-	}
-	con.Write([]byte(ip))  //write the route server ip address
-	con.Write([]byte(req)) //write the normal data
-*/
+//
+//	ip := net.ParseIP("127.0.0.1").To4()
+//	con, err := net.Dial("tcp", "localhost:9000")
+//	if err != nil {
+//		t.Error(err)
+//		return
+//	}
+//	con.Write([]byte(ip))  //write the route server ip address
+//	con.Write([]byte(req)) //write the normal data
 type IPWithAddressHeaderHijack struct {
 }
 
-func (h *IPWithAddressHeaderHijack) SelectRouteConnection(o *Route, con net.Conn) (*RouteConnection, error) {
+func (h *IPWithAddressHeaderHijack) SelectRouteConnection(o *Route, con net.Conn) (*APConnection, error) {
 	con.SetReadDeadline(time.Now().Add(time.Duration(o.ReadTimeoutSecond) * time.Second))
 	ipV4 := make([]byte, 4)
 	_, err := con.Read(ipV4)
@@ -34,7 +33,7 @@ func (h *IPWithAddressHeaderHijack) SelectRouteConnection(o *Route, con net.Conn
 	}
 	con.SetReadDeadline(time.Now().Add(time.Duration(o.ClientExpireTimeoutSecond) * time.Second))
 	key := ((net.IP)(ipV4)).String()
-	rc := o.route.lookupConnection(key)
+	rc := o.LookupConnection(key)
 	if rc == nil {
 		log.Println("no routeconnection avaliable for key:", key)
 		return nil, errors.New("no routeconnection avaliable for key:" + key)
@@ -105,14 +104,14 @@ func (h *IPWithPolicyHijack) LookupDestAddress(ip net.IP) (string, error) {
 	return "", errors.New("policy not found for " + ip.String())
 }
 
-func (h *IPWithPolicyHijack) SelectRouteConnection(o *Route, con net.Conn) (*RouteConnection, error) {
+func (h *IPWithPolicyHijack) SelectRouteConnection(o *Route, con net.Conn) (*APConnection, error) {
 	srcAddress, _, _ := net.SplitHostPort(con.RemoteAddr().String())
 	address := net.ParseIP(srcAddress)
 	key, err := h.LookupDestAddress(address)
 	if err != nil {
 		return nil, err
 	}
-	rc := o.route.lookupConnection(key)
+	rc := o.LookupConnection(key)
 	if rc == nil {
 		log.Println("no routeconnection avaliable for key:", key)
 		return nil, errors.New("no routeconnection avaliable for key:" + key)

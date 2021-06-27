@@ -14,7 +14,8 @@ import (
 	"time"
 )
 
-type RouteStream struct {
+//RouteAPStream server side AP Stream
+type RouteAPStream struct {
 	isClosed      bool
 	closed        chan int
 	id            uint16
@@ -24,8 +25,9 @@ type RouteStream struct {
 	w             chan []byte
 }
 
-func NewRouteStream(id uint16, commandWriter CommandWriter) *RouteStream {
-	return &RouteStream{
+//NewRouteAPStream create instance of RouteAPStream
+func NewRouteAPStream(id uint16, commandWriter CommandWriter) *RouteAPStream {
+	return &RouteAPStream{
 		isClosed:      false,
 		closed:        make(chan int),
 		id:            id,
@@ -36,7 +38,7 @@ func NewRouteStream(id uint16, commandWriter CommandWriter) *RouteStream {
 	}
 }
 
-func (o *RouteStream) readFromCache(b []byte) (int, error) {
+func (o *RouteAPStream) readFromCache(b []byte) (int, error) {
 	o.lock.Lock()
 	defer o.lock.Unlock()
 	if o.cache.Len() > 0 {
@@ -45,7 +47,7 @@ func (o *RouteStream) readFromCache(b []byte) (int, error) {
 	return 0, nil
 }
 
-func (o *RouteStream) readToCache() {
+func (o *RouteAPStream) readToCache() {
 	o.lock.Lock()
 	defer o.lock.Unlock()
 	if len(o.w) > 0 {
@@ -54,7 +56,8 @@ func (o *RouteStream) readToCache() {
 	}
 }
 
-func (o *RouteStream) Read(b []byte) (int, error) {
+//Read implement io.Reader
+func (o *RouteAPStream) Read(b []byte) (int, error) {
 	n, err := o.readFromCache(b)
 	if n > 0 {
 		o.readToCache()
@@ -71,13 +74,14 @@ func (o *RouteStream) Read(b []byte) (int, error) {
 	}
 }
 
-func (o *RouteStream) Write(b []byte) (int, error) {
+//Write implement io.Write
+func (o *RouteAPStream) Write(b []byte) (int, error) {
 	cmd := DataCommand(b, o.id)
 	o.commandWriter.AsyncWriteCommand(cmd)
 	return len(b), nil
 }
 
-func (o *RouteStream) close(sendException bool) {
+func (o *RouteAPStream) close(sendException bool) {
 	o.lock.Lock()
 	if o.isClosed {
 		return
@@ -93,12 +97,13 @@ func (o *RouteStream) close(sendException bool) {
 	return
 }
 
-func (o *RouteStream) Close() error {
+//Close implement the io.Closer
+func (o *RouteAPStream) Close() error {
 	o.close(true)
 	return nil
 }
 
-func (o *RouteStream) onPacketReceived(data []byte) {
+func (o *RouteAPStream) onPacketReceived(data []byte) {
 	o.lock.Lock()
 	defer o.lock.Unlock()
 	if o.isClosed {
@@ -116,7 +121,7 @@ func (o *RouteStream) onPacketReceived(data []byte) {
 
 type waitResult struct {
 	code   byte
-	stream *RouteStream
+	stream *RouteAPStream
 }
 
 type allocateWaitObject struct {
@@ -125,10 +130,11 @@ type allocateWaitObject struct {
 	hash   string
 }
 
-type RouteConnection struct {
+//APConnection the connection of AP
+type APConnection struct {
 	isClosed      bool
 	serverConn    net.Conn
-	streams       map[uint16]*RouteStream
+	streams       map[uint16]*RouteAPStream
 	lock          sync.RWMutex
 	waitQueue     map[string]*allocateWaitObject
 	wCmd          chan Command
@@ -136,10 +142,10 @@ type RouteConnection struct {
 	expireTimeout time.Duration
 }
 
-func NewRouteConnection(con net.Conn, expireTimeout time.Duration) *RouteConnection {
-	c := &RouteConnection{
+func newAPConnection(con net.Conn, expireTimeout time.Duration) *APConnection {
+	c := &APConnection{
 		serverConn:    con,
-		streams:       map[uint16]*RouteStream{},
+		streams:       map[uint16]*RouteAPStream{},
 		lock:          sync.RWMutex{},
 		waitQueue:     map[string]*allocateWaitObject{},
 		wCmd:          make(chan Command, 1024),
@@ -151,7 +157,7 @@ func NewRouteConnection(con net.Conn, expireTimeout time.Duration) *RouteConnect
 	return c
 }
 
-func (o *RouteConnection) Close() error {
+func (o *APConnection) Close() error {
 	o.lock.Lock()
 	defer o.lock.Unlock()
 	if o.isClosed {
@@ -166,7 +172,7 @@ func (o *RouteConnection) Close() error {
 	return nil
 }
 
-func (o *RouteConnection) processLoop() {
+func (o *APConnection) processLoop() {
 	for {
 		cmd := <-o.rCmd
 		if cmd == nil {
@@ -177,11 +183,11 @@ func (o *RouteConnection) processLoop() {
 	}
 }
 
-func (o *RouteConnection) processCommand(cmd Command) {
+func (o *APConnection) processCommand(cmd Command) {
 	switch cmd.Type() {
 	case CommandConnectResponse:
 		var waitObject *allocateWaitObject
-		var stream *RouteStream
+		var stream *RouteAPStream
 		payload := cmd.Payload()
 		code := payload[0]
 		hash := payload[1:]
@@ -194,7 +200,7 @@ func (o *RouteConnection) processCommand(cmd Command) {
 			break
 		}
 		if code == 0 {
-			stream = NewRouteStream(cmd.StreamID(), o)
+			stream = NewRouteAPStream(cmd.StreamID(), o)
 			o.streams[cmd.StreamID()] = stream
 		}
 		log.Println("allocate stream:", cmd.StreamID(), " error code:", code)
@@ -221,7 +227,7 @@ func (o *RouteConnection) processCommand(cmd Command) {
 	}
 }
 
-func (o *RouteConnection) readLoop() {
+func (o *APConnection) readLoop() {
 	for {
 		o.serverConn.SetReadDeadline(time.Now().Add(o.expireTimeout))
 		buf := make([]byte, MaxPacketSize)
@@ -243,7 +249,7 @@ func (o *RouteConnection) readLoop() {
 	}
 }
 
-func (o *RouteConnection) writeLoop() {
+func (o *APConnection) writeLoop() {
 	for {
 		cmd := <-o.wCmd
 		if cmd == nil {
@@ -259,11 +265,13 @@ func (o *RouteConnection) writeLoop() {
 	}
 }
 
-func (o *RouteConnection) AsyncWriteCommand(cmd Command) {
+//AsyncWriteCommand implement CommandWriter
+func (o *APConnection) AsyncWriteCommand(cmd Command) {
 	o.wCmd <- cmd
 }
 
-func (o *RouteConnection) AllocateStream(timeout time.Duration) (stream *RouteStream, err error) {
+//AllocateStream allocate one stream from this AP
+func (o *APConnection) AllocateStream(timeout time.Duration) (stream *RouteAPStream, err error) {
 	hash := md5.Sum([]byte(time.Now().String()))
 	waitObject := &allocateWaitObject{
 		exit:   make(chan int),
@@ -302,81 +310,99 @@ func (o *RouteConnection) AllocateStream(timeout time.Duration) (stream *RouteSt
 	return
 }
 
-type APGroup struct {
-	lock  sync.RWMutex
-	conns map[string]*RouteConnection
+//APManger ap connection manger
+type APManger struct {
+	apConnsLock sync.RWMutex
+	apConns     map[string]*APConnection
 }
 
-func NewAPGroup() *APGroup {
-	return &APGroup{lock: sync.RWMutex{}, conns: map[string]*RouteConnection{}}
+//NewAPManger new instance of APManger
+func NewAPManger() *APManger {
+	return &APManger{apConnsLock: sync.RWMutex{}, apConns: map[string]*APConnection{}}
 }
 
-func (o *APGroup) lookupConnection(key string) *RouteConnection {
-	o.lock.Lock()
-	defer o.lock.Unlock()
-	return o.conns[key]
+//LookupConnection lookup APConnection
+func (o *APManger) LookupConnection(key string) *APConnection {
+	o.apConnsLock.Lock()
+	defer o.apConnsLock.Unlock()
+	return o.apConns[key]
 }
 
-func (o *APGroup) pickupConnection() *RouteConnection {
+//PickupConnection random pickup APConnection
+func (o *APManger) PickupConnection() *APConnection {
 	index := (int)(time.Now().UnixNano() & 0xFFFFFF)
-	o.lock.Lock()
-	defer o.lock.Unlock()
-	size := len(o.conns)
-	list := make([]*RouteConnection, size)
+	o.apConnsLock.Lock()
+	defer o.apConnsLock.Unlock()
+	size := len(o.apConns)
+	list := make([]*APConnection, size)
 	i := 0
-	for _, v := range o.conns {
+	for _, v := range o.apConns {
 		list[i] = v
 		i++
 	}
 	return list[index%size]
 }
 
-func (o *APGroup) removeConnection(key string) *RouteConnection {
-	o.lock.Lock()
-	defer o.lock.Unlock()
-	con := o.conns[key]
-	delete(o.conns, key)
+func (o *APManger) removeConnection(key string) *APConnection {
+	o.apConnsLock.Lock()
+	defer o.apConnsLock.Unlock()
+	con := o.apConns[key]
+	delete(o.apConns, key)
 	return con
 }
 
-func (o *APGroup) serverNewConnection(con net.Conn, expireTimeout time.Duration, key string) {
+func (o *APManger) addConnection(key string, ac *APConnection) {
+	o.apConnsLock.Lock()
+	defer o.apConnsLock.Unlock()
+	o.apConns[key] = ac
+}
+
+//ServerNewConnection start serve new connection
+func (o *APManger) ServerNewConnection(con net.Conn, expireTimeout time.Duration, key string) {
 	old := o.removeConnection(key)
 	if old != nil {
 		old.Close()
 	}
 	log.Println("add RouteConnection:", con.RemoteAddr().String())
-	rc := NewRouteConnection(con, expireTimeout)
-	o.lock.Lock()
-	o.conns[key] = rc
-	o.lock.Unlock()
+	rc := newAPConnection(con, expireTimeout)
+	o.addConnection(key, rc)
 	rc.readLoop()
 	log.Println("remove RouteConnection:", con.RemoteAddr().String())
 	o.removeConnection(key)
 	rc.Close()
 }
 
-func (o *APGroup) AllocateStream(key string, timeout time.Duration) (*RouteStream, error) {
-	rc := o.lookupConnection(key)
+//AllocateStream allocate stream use key matched APConnection
+func (o *APManger) AllocateStream(key string, timeout time.Duration) (*RouteAPStream, error) {
+	rc := o.LookupConnection(key)
 	if rc == nil {
 		return nil, errors.New("RouteConnection not exist for key:" + key)
 	}
 	return rc.AllocateStream(timeout)
 }
 
-type clientContext struct {
-	addr       string
-	conn       net.Conn
-	activeTime time.Time
-	sendBytes  int64
-	recvBytes  int64
-	sendSpeed  int64
-	recvSpeed  int64
+//the client context
+type ClientContext struct {
+	addr string
+	conn net.Conn
+	//ActiveTime last active time
+	ActiveTime time.Time
+	//SendBytes the total bytes of client sended
+	SendBytes int64
+	//RecvBytes the total bytes of client received
+	RecvBytes int64
+	//SendSpeed the speed of client send
+	SendSpeed int64
+	//RecvSpeed the speed of client recv
+	RecvSpeed int64
+	tempSend  int64
+	tempRecv  int64
 }
 
 type RouteHijack interface {
 	//SelectRouteConnection
 	//called when new client connection accept
-	SelectRouteConnection(*Route, net.Conn) (*RouteConnection, error)
+	SelectRouteConnection(*Route, net.Conn) (*APConnection, error)
 	//GetRouteConnectionKey
 	//called when new route server connection accept
 	GetRouteConnectionKey(*Route, net.Conn) (string, error)
@@ -398,13 +424,14 @@ type Route struct {
 	//the route connection expire timeout,
 	//if in this timeout not have any traffic,close the connection
 	ServerExpireTimeoutSecond int
-	route                     *APGroup
-	clientsLock               sync.RWMutex
-	clients                   map[string]*clientContext
-	hijack                    RouteHijack
-	serverListener            net.Listener
-	routeListener             net.Listener
-	exit                      chan int
+	//apManger                  *APManger
+	clientsLock    sync.RWMutex
+	clients        map[string]*ClientContext
+	hijack         RouteHijack
+	serverListener net.Listener
+	routeListener  net.Listener
+	exit           chan int
+	APManger
 }
 
 func (o *Route) Hijack(h RouteHijack) *Route {
@@ -423,12 +450,14 @@ func (o *Route) expireTimeoutBackgroundThread() {
 			now := time.Now()
 			o.clientsLock.Lock()
 			for k, v := range o.clients {
-				if now.After(v.activeTime) && now.Sub(v.activeTime) > time.Duration(o.ClientExpireTimeoutSecond)*time.Second {
+				if now.After(v.ActiveTime) && now.Sub(v.ActiveTime) > time.Duration(o.ClientExpireTimeoutSecond)*time.Second {
 					v.conn.Close()
 					delete(o.clients, k)
 				}
-				v.sendSpeed = 0
-				v.recvSpeed = 0
+				v.SendSpeed = v.tempSend / int64(o.ClientExpireTimeoutSecond) / 2
+				v.RecvSpeed = v.tempRecv / int64(o.ClientExpireTimeoutSecond) / 2
+				v.tempSend = 0
+				v.tempRecv = 0
 			}
 			o.clientsLock.Unlock()
 
@@ -436,20 +465,20 @@ func (o *Route) expireTimeoutBackgroundThread() {
 	}
 }
 
-func (o *Route) addClientConnection(ctx *clientContext) {
+func (o *Route) addClientConnection(ctx *ClientContext) {
 	o.clientsLock.Lock()
 	defer o.clientsLock.Unlock()
 	ctx.addr = ctx.conn.RemoteAddr().String()
 	o.clients[ctx.addr] = ctx
 }
 
-func (o *Route) removeClientConnection(ctx *clientContext) {
+func (o *Route) removeClientConnection(ctx *ClientContext) {
 	o.clientsLock.Lock()
 	defer o.clientsLock.Unlock()
 	delete(o.clients, ctx.addr)
 }
 
-func (o *Route) copyIO(dst io.Writer, src io.Reader, ctx *clientContext, send bool) {
+func (o *Route) copyIO(dst io.Writer, src io.Reader, ctx *ClientContext, send bool) {
 	buf := make([]byte, 1024*32)
 	for {
 		n, err := src.Read(buf)
@@ -461,13 +490,13 @@ func (o *Route) copyIO(dst io.Writer, src io.Reader, ctx *clientContext, send bo
 			break
 		}
 		if send {
-			ctx.sendSpeed += int64(n)
-			ctx.sendBytes += int64(n)
+			ctx.tempSend += int64(n)
+			ctx.SendBytes += int64(n)
 		} else {
-			ctx.recvSpeed += int64(n)
-			ctx.recvBytes += int64(n)
+			ctx.tempRecv += int64(n)
+			ctx.RecvBytes += int64(n)
 		}
-		ctx.activeTime = time.Now()
+		ctx.ActiveTime = time.Now()
 	}
 }
 
@@ -503,11 +532,11 @@ func (o *Route) serveAP() error {
 	}
 }
 
-func (o *Route) selectRouteConnection(con net.Conn) (*RouteConnection, error) {
+func (o *Route) selectRouteConnection(con net.Conn) (*APConnection, error) {
 	if o.hijack != nil {
 		return o.hijack.SelectRouteConnection(o, con)
 	}
-	rc := o.route.pickupConnection()
+	rc := o.PickupConnection()
 	if rc == nil {
 		return nil, errors.New("not routeconnection avaliable")
 	}
@@ -528,7 +557,7 @@ func (o *Route) routeConnectionHandler(con net.Conn) {
 		con.Close()
 		return
 	}
-	o.route.serverNewConnection(con, time.Duration(o.ServerExpireTimeoutSecond)*time.Second, key)
+	o.ServerNewConnection(con, time.Duration(o.ServerExpireTimeoutSecond)*time.Second, key)
 }
 
 func (o *Route) serverConnectionHandler(con net.Conn) {
@@ -544,7 +573,7 @@ func (o *Route) serverConnectionHandler(con net.Conn) {
 		return
 	}
 	defer rs.Close()
-	ctx := &clientContext{activeTime: time.Now()}
+	ctx := &ClientContext{ActiveTime: time.Now()}
 	ctx.conn = con
 	o.addClientConnection(ctx)
 	go o.copyIO(con, rs, ctx, false)
@@ -552,10 +581,10 @@ func (o *Route) serverConnectionHandler(con net.Conn) {
 	o.removeClientConnection(ctx)
 }
 
+//Close close the route
 func (o *Route) Close() error {
 	if o.serverListener != nil {
 		o.serverListener.Close()
-		o.serverListener = nil
 	}
 	if o.routeListener != nil {
 		o.routeListener.Close()
@@ -563,10 +592,12 @@ func (o *Route) Close() error {
 	return nil
 }
 
+//Run the route unitil catch some error
 func (o *Route) Run() {
-	o.route = NewAPGroup()
+	o.apConnsLock = sync.RWMutex{}
+	o.apConns = map[string]*APConnection{}
 	o.clientsLock = sync.RWMutex{}
-	o.clients = map[string]*clientContext{}
+	o.clients = map[string]*ClientContext{}
 	o.exit = make(chan int)
 	go o.expireTimeoutBackgroundThread()
 	wg := sync.WaitGroup{}

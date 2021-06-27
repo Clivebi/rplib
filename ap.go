@@ -12,6 +12,7 @@ type CommandWriter interface {
 	AsyncWriteCommand(cmd Command)
 }
 
+//APStream access point side stream
 type APStream struct {
 	isClosed      bool
 	id            uint16
@@ -20,6 +21,7 @@ type APStream struct {
 	commandWriter CommandWriter
 }
 
+//Close close the stream
 func (o *APStream) Close() {
 	if o.isClosed {
 		return
@@ -72,6 +74,7 @@ func (o *APStream) readLoop() {
 	}
 }
 
+//AP access point
 type AP struct {
 	AliveTick    time.Duration
 	conn         net.Conn
@@ -83,6 +86,7 @@ type AP struct {
 	rCmd         chan Command
 }
 
+//Close close the access point
 func (o *AP) Close() error {
 	//step 1 raise readloop exit
 	//step 2 shutdown all stream
@@ -221,12 +225,14 @@ func (o *AP) AsyncWriteCommand(cmd Command) {
 	o.wCmd <- cmd
 }
 
+//Run run the ap unitil catch some error
 func (o *AP) Run() {
 	go o.processLoop()
 	go o.writeLoop()
 	o.readLoop()
 }
 
+//NewAP create new AP instance
 func NewAP(routeAddress string, backendAddress string, aliveTick time.Duration) (*AP, error) {
 	con, err := net.Dial("tcp4", routeAddress)
 	if err != nil {
