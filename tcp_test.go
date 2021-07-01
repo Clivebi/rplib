@@ -1,6 +1,7 @@
 package rplib_test
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"testing"
@@ -108,6 +109,66 @@ func TestWithPolicy(t *testing.T) {
 		t.Error(err)
 		return
 	}
+	con.Write([]byte(req))
+	buf := make([]byte, 4096)
+	con.Read(buf)
+	fmt.Println(string(buf))
+}
+
+type authTest struct {
+}
+
+func (o *authTest) DoAuthenticate(user string, key string, ip string) error {
+	if user == "test" && key == "test" {
+		return nil
+	}
+	return errors.New("invalid username/password")
+}
+
+func buildAuthBuffer(user string, key string) []byte {
+	buf := make([]byte, len(key)+len(user)+2)
+	i := 0
+	buf[0] = byte(len(user))
+	i++
+	copy(buf[i:], []byte(user))
+	i += len(user)
+	buf[i] = byte(len(key))
+	i++
+	copy(buf[i:], []byte(key))
+	return buf
+}
+
+func TestAuth(t *testing.T) {
+	route := rplib.Route{}
+	route.ServerAddress = "localhost:9000"
+	route.RouteAddress = "localhost:9001"
+	route.ClientExpireTimeoutSecond = 60 * 2
+	route.ReadTimeoutSecond = 30
+	route.ServerExpireTimeoutSecond = 8 * 60
+
+	route.Hijack(
+		&rplib.AuthenticateHijack{
+			Auth: &authTest{},
+		},
+	)
+	go route.Run()
+	defer route.Close()
+	time.Sleep(time.Second * 3) //wait route serve runing
+	// route request to www.baidu.com:80
+	ap, err := rplib.NewAP("localhost:9001", "www.baidu.com:80", time.Minute*4)
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	defer ap.Close()
+	go ap.Run()
+
+	con, err := net.Dial("tcp", "localhost:9000")
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	con.Write(buildAuthBuffer("test", "test"))
 	con.Write([]byte(req))
 	buf := make([]byte, 4096)
 	con.Read(buf)
