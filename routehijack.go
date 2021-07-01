@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-//IPWithAddressHeaderHijack implement ip address(IPv4) header protocol
+//ProtocolSelectorHijack implement ip address(IPv4) header protocol
 //the client must send the route server address before normal traffic
 //example:
 //
@@ -20,10 +20,10 @@ import (
 //	}
 //	con.Write([]byte(ip))  //write the route server ip address
 //	con.Write([]byte(req)) //write the normal data
-type IPWithAddressHeaderHijack struct {
+type ProtocolSelectorHijack struct {
 }
 
-func (h *IPWithAddressHeaderHijack) SelectRouteConnection(o *Route, con net.Conn) (*APConnection, error) {
+func (h *ProtocolSelectorHijack) SelectRouteConnection(o *Route, con net.Conn) (*APConnection, error) {
 	con.SetReadDeadline(time.Now().Add(time.Duration(o.ReadTimeoutSecond) * time.Second))
 	ipV4 := make([]byte, 4)
 	_, err := con.Read(ipV4)
@@ -41,7 +41,7 @@ func (h *IPWithAddressHeaderHijack) SelectRouteConnection(o *Route, con net.Conn
 	return rc, nil
 }
 
-func (h *IPWithAddressHeaderHijack) GetRouteConnectionKey(o *Route, con net.Conn) (string, error) {
+func (h *ProtocolSelectorHijack) GetRouteConnectionKey(o *Route, con net.Conn) (string, error) {
 	key, _, _ := net.SplitHostPort(con.RemoteAddr().String())
 	return key, nil
 }
@@ -51,16 +51,16 @@ type routeItem struct {
 	dst string
 }
 
-//IPWithPolicyHijack policy implement
+//PolicySelectorHijack policy implement
 //implement ip route policy
-type IPWithPolicyHijack struct {
+type PolicySelectorHijack struct {
 	routeItemsLock sync.RWMutex
 	routeItems     []*routeItem
 }
 
 //AddPolicy add policy
 //when the src contain the client ip address,use the dst address route server
-func (h *IPWithPolicyHijack) AddPolicy(src *net.IPNet, dst string) {
+func (h *PolicySelectorHijack) AddPolicy(src *net.IPNet, dst string) {
 	item := &routeItem{src: src, dst: dst}
 	h.routeItemsLock.Lock()
 	defer h.routeItemsLock.Unlock()
@@ -72,7 +72,7 @@ func (h *IPWithPolicyHijack) AddPolicy(src *net.IPNet, dst string) {
 	}
 }
 
-func (h *IPWithPolicyHijack) remove(src *net.IPNet) {
+func (h *PolicySelectorHijack) remove(src *net.IPNet) {
 	news := make([]*routeItem, len(h.routeItems))
 	i := 0
 	for _, v := range h.routeItems {
@@ -84,7 +84,7 @@ func (h *IPWithPolicyHijack) remove(src *net.IPNet) {
 	}
 }
 
-func (h *IPWithPolicyHijack) RemovePolicy(src *net.IPNet) {
+func (h *PolicySelectorHijack) RemovePolicy(src *net.IPNet) {
 	h.routeItemsLock.Lock()
 	defer h.routeItemsLock.Unlock()
 	if h.routeItems == nil {
@@ -93,7 +93,7 @@ func (h *IPWithPolicyHijack) RemovePolicy(src *net.IPNet) {
 	h.remove(src)
 }
 
-func (h *IPWithPolicyHijack) LookupDestAddress(ip net.IP) (string, error) {
+func (h *PolicySelectorHijack) LookupDestAddress(ip net.IP) (string, error) {
 	h.routeItemsLock.Lock()
 	defer h.routeItemsLock.Unlock()
 	for _, v := range h.routeItems {
@@ -104,7 +104,7 @@ func (h *IPWithPolicyHijack) LookupDestAddress(ip net.IP) (string, error) {
 	return "", errors.New("policy not found for " + ip.String())
 }
 
-func (h *IPWithPolicyHijack) SelectRouteConnection(o *Route, con net.Conn) (*APConnection, error) {
+func (h *PolicySelectorHijack) SelectRouteConnection(o *Route, con net.Conn) (*APConnection, error) {
 	srcAddress, _, _ := net.SplitHostPort(con.RemoteAddr().String())
 	address := net.ParseIP(srcAddress)
 	key, err := h.LookupDestAddress(address)
@@ -119,7 +119,64 @@ func (h *IPWithPolicyHijack) SelectRouteConnection(o *Route, con net.Conn) (*APC
 	return rc, nil
 }
 
-func (h *IPWithPolicyHijack) GetRouteConnectionKey(o *Route, con net.Conn) (string, error) {
+func (h *PolicySelectorHijack) GetRouteConnectionKey(o *Route, con net.Conn) (string, error) {
 	key, _, _ := net.SplitHostPort(con.RemoteAddr().String())
 	return key, nil
+}
+
+//Authenticator Authenticator interface
+type Authenticator interface {
+	//DoAuthenticate verify username - password & pair
+	DoAuthenticate(user string, key string, ip string) error
+}
+
+//AuthenticateHijack provider base user-key authenticate implement
+//protocol
+// namesize(1byte)+name(namesize)+keysize(1byte)+key(keysize)
+type AuthenticateHijack struct {
+	//Auth the Authenticate implement i
+	Auth Authenticator
+}
+
+func (h *AuthenticateHijack) SelectRouteConnection(o *Route, con net.Conn) (*APConnection, error) {
+	var user, key string
+	size := make([]byte, 1)
+	buf := make([]byte, 255)
+	con.SetReadDeadline(time.Now().Add(time.Duration(o.ReadTimeoutSecond) * time.Second))
+	_, err := con.Read(size)
+	if err != nil {
+		return nil, err
+	}
+	con.SetReadDeadline(time.Now().Add(time.Duration(o.ReadTimeoutSecond) * time.Second))
+	_, err = con.Read(buf[:int(size[0])])
+	if err != nil {
+		return nil, err
+	}
+	user = string(buf[:int(size[0])])
+	_, err = con.Read(size)
+	if err != nil {
+		return nil, err
+	}
+	con.SetReadDeadline(time.Now().Add(time.Duration(o.ReadTimeoutSecond) * time.Second))
+	_, err = con.Read(buf[:int(size[0])])
+	if err != nil {
+		return nil, err
+	}
+	key = string(buf[:int(size[0])])
+	con.SetReadDeadline(time.Now().Add(time.Duration(o.ClientExpireTimeoutSecond) * time.Second))
+	if h.Auth != nil {
+		err = h.Auth.DoAuthenticate(user, key, con.RemoteAddr().String())
+		if err != nil {
+			return nil, err
+		}
+	}
+	rc := o.PickupMinimumStreamConnection()
+	if rc == nil {
+		return nil, errors.New("no routeconnection avaliable")
+	}
+	return rc, nil
+}
+
+func (h *AuthenticateHijack) GetRouteConnectionKey(o *Route, con net.Conn) (string, error) {
+	return con.RemoteAddr().String(), nil
 }

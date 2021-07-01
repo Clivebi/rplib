@@ -133,6 +133,7 @@ type allocateWaitObject struct {
 
 //APConnection the connection of AP
 type APConnection struct {
+	streamCount   int
 	isClosed      bool
 	serverConn    net.Conn
 	streams       map[uint16]*RouteAPStream
@@ -145,6 +146,7 @@ type APConnection struct {
 
 func newAPConnection(con net.Conn, expireTimeout time.Duration) *APConnection {
 	c := &APConnection{
+		streamCount:   0,
 		serverConn:    con,
 		streams:       map[uint16]*RouteAPStream{},
 		lock:          sync.RWMutex{},
@@ -203,6 +205,7 @@ func (o *APConnection) processCommand(cmd Command) {
 		if code == 0 {
 			stream = NewRouteAPStream(cmd.StreamID(), o)
 			o.streams[cmd.StreamID()] = stream
+			o.streamCount++
 		}
 		log.Println("allocate stream:", cmd.StreamID(), " error code:", code)
 		waitObject.result <- waitResult{
@@ -219,6 +222,7 @@ func (o *APConnection) processCommand(cmd Command) {
 		if stream != nil {
 			stream.close(false)
 			delete(o.streams, cmd.StreamID())
+			o.streamCount--
 		}
 		log.Println("remove stream:", cmd.StreamID())
 	case CommandEcho:
@@ -269,6 +273,11 @@ func (o *APConnection) writeLoop() {
 //AsyncWriteCommand implement CommandWriter
 func (o *APConnection) AsyncWriteCommand(cmd Command) {
 	o.wCmd <- cmd
+}
+
+//StreamSize return count of stream on this connection
+func (o *APConnection) StreamSize() int {
+	return o.streamCount
 }
 
 //AllocateStream allocate one stream from this AP
@@ -322,11 +331,49 @@ func NewAPManger() *APManger {
 	return &APManger{apConnsLock: sync.RWMutex{}, apConns: map[string]*APConnection{}}
 }
 
+//ListKey get all connection keys
+func (o *APManger) ListKey() []string {
+	o.apConnsLock.Lock()
+	defer o.apConnsLock.Unlock()
+	ret := make([]string, len(o.apConns))
+	i := 0
+	for k := range o.apConns {
+		ret[i] = k
+		i++
+	}
+	return ret
+}
+
+//ConnectionSize get the connection count
+func (o *APManger) ConnectionSize() int {
+	o.apConnsLock.Lock()
+	defer o.apConnsLock.Unlock()
+	return len(o.apConns)
+}
+
 //LookupConnection lookup APConnection
 func (o *APManger) LookupConnection(key string) *APConnection {
 	o.apConnsLock.Lock()
 	defer o.apConnsLock.Unlock()
 	return o.apConns[key]
+}
+
+//PickupMinimumStreamConnection get the minimum stream count connection
+func (o *APManger) PickupMinimumStreamConnection() *APConnection {
+	o.apConnsLock.Lock()
+	defer o.apConnsLock.Unlock()
+	count := 1000000
+	var rc *APConnection
+	for _, v := range o.apConns {
+		if v.StreamSize() == 0 {
+			return v
+		}
+		if v.StreamSize() < count {
+			count = v.StreamSize()
+			rc = v
+		}
+	}
+	return rc
 }
 
 //PickupConnection random pickup APConnection

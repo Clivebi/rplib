@@ -33,7 +33,7 @@ func main() {
 	route.ReadTimeoutSecond = *readTimeout
 	route.ServerExpireTimeoutSecond = 8 * 60
 	if *multiMode {
-		route.Hijack(&rplib.IPWithAddressHeaderHijack{})
+		route.Hijack(&rplib.ProtocolSelectorHijack{})
 	}
 	route.Run()
 }

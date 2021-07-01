@@ -20,7 +20,7 @@ func TestWithIPAddressHeader(t *testing.T) {
 	route.ClientExpireTimeoutSecond = 60 * 2
 	route.ReadTimeoutSecond = 30
 	route.ServerExpireTimeoutSecond = 8 * 60
-	route.Hijack(&rplib.IPWithAddressHeaderHijack{})
+	route.Hijack(&rplib.ProtocolSelectorHijack{})
 	go route.Run()
 	defer route.Close()
 	time.Sleep(time.Second * 3) //wait route serve runing
@@ -86,7 +86,7 @@ func TestWithPolicy(t *testing.T) {
 	route.ServerExpireTimeoutSecond = 8 * 60
 
 	//add route policy
-	policy := &rplib.IPWithPolicyHijack{}
+	policy := &rplib.PolicySelectorHijack{}
 	_, im, _ := net.ParseCIDR("127.0.0.1/32")
 	policy.AddPolicy(im, "127.0.0.1")
 	route.Hijack(policy)
