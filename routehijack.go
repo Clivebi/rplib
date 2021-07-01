@@ -130,6 +130,24 @@ type Authenticator interface {
 	DoAuthenticate(user string, key string, ip string) error
 }
 
+//WriteCredentials write username/password to connection
+func WriteCredentials(name, key string, con net.Conn) error {
+	if len(name) > 255 || len(key) > 255 {
+		return errors.New("the length of name or key out of limit(255)")
+	}
+	buf := make([]byte, len(key)+len(name)+2)
+	i := 0
+	buf[0] = byte(len(name))
+	i++
+	copy(buf[i:], []byte(name))
+	i += len(name)
+	buf[i] = byte(len(key))
+	i++
+	copy(buf[i:], []byte(key))
+	_, err := con.Write(buf)
+	return err
+}
+
 //AuthenticateHijack provider base user-key authenticate implement
 //protocol
 // namesize(1byte)+name(namesize)+keysize(1byte)+key(keysize)

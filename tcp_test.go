@@ -125,19 +125,6 @@ func (o *authTest) DoAuthenticate(user string, key string, ip string) error {
 	return errors.New("invalid username/password")
 }
 
-func buildAuthBuffer(user string, key string) []byte {
-	buf := make([]byte, len(key)+len(user)+2)
-	i := 0
-	buf[0] = byte(len(user))
-	i++
-	copy(buf[i:], []byte(user))
-	i += len(user)
-	buf[i] = byte(len(key))
-	i++
-	copy(buf[i:], []byte(key))
-	return buf
-}
-
 func TestAuth(t *testing.T) {
 	route := rplib.Route{}
 	route.ServerAddress = "localhost:9000"
@@ -168,7 +155,8 @@ func TestAuth(t *testing.T) {
 		t.Error(err)
 		return
 	}
-	con.Write(buildAuthBuffer("test", "test"))
+	rplib.WriteCredentials("test", "test", con)
+	//con.Write(buildAuthBuffer("test", "test"))
 	con.Write([]byte(req))
 	buf := make([]byte, 4096)
 	con.Read(buf)
