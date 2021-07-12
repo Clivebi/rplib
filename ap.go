@@ -1,12 +1,16 @@
 package rplib
 
 import (
-	"encoding/binary"
 	"log"
 	"net"
 	"sync"
 	"time"
 )
+
+//func logBufferHash(prefix string, b []byte) {
+//	sh := md5.Sum(b)
+//	fmt.Println(prefix, " size=", len(b), " hash=", hex.EncodeToString(sh[:]))
+//}
 
 type CommandWriter interface {
 	AsyncWriteCommand(cmd Command)
@@ -62,14 +66,14 @@ func (o *APStream) writeLoop() {
 }
 
 func (o *APStream) readLoop() {
-	cache_size := MaxPacketSize - payloadOffset
 	for {
-		buf := make([]byte, cache_size)
+		buf := make([]byte, 4*1024)
 		n, err := o.backend.Read(buf)
 		if err != nil {
 			o.exception(err)
 			break
 		}
+		//logBufferHash("server write:", buf[:n])
 		o.dataArrived(buf[:n])
 	}
 }
@@ -110,7 +114,7 @@ func (o *AP) processLoop() {
 		if cmd == nil {
 			break
 		}
-		log.Println("process command:", cmd)
+		//log.Println("process command:", cmd)
 		o.processCommand(cmd)
 	}
 }
@@ -153,6 +157,7 @@ func (o *AP) processCommand(cmd Command) {
 		go o.processConnect(cmd, id)
 	case CommandData:
 		st := o.lookupStream(cmd.StreamID())
+		//logBufferHash("receive transfer data ", cmd.Payload())
 		if st != nil {
 			st.w <- cmd.Payload()
 		}
@@ -174,23 +179,12 @@ func (o *AP) processCommand(cmd Command) {
 
 func (o *AP) readLoop() {
 	for {
-		buf := make([]byte, MaxPacketSize)
-		n, err := o.conn.Read(buf[:2])
-		if err != nil || n != 2 {
+		o.conn.SetReadDeadline(time.Now().Add(o.AliveTick * 2))
+		cmd, err := readCommand(o.conn)
+		if err != nil {
 			log.Println(err)
 			break
 		}
-		size := binary.BigEndian.Uint16(buf)
-		if size > MaxPacketSize {
-			log.Println("out of maxpacketsize")
-			break
-		}
-		n, err = o.conn.Read(buf[2 : 2+size])
-		if err != nil || n != int(size) {
-			log.Println(err)
-			break
-		}
-		cmd := (Command)(buf[:2+size])
 		o.rCmd <- cmd
 	}
 }

@@ -3,12 +3,14 @@ package rplib
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
+	"io"
 )
 
 const (
 	//MaxPacketSize the max packet size
-	MaxPacketSize = 32 * 1024
+	MaxPacketSize = 8 * 1024
 	//CommandConnect connect command used by route side
 	CommandConnect = byte(1)
 	//CommandConnectResponse connect response used by ap side
@@ -149,4 +151,27 @@ func ExceptionCommand(data []byte, StreamID uint16) Command {
 	buf.SetStreamID(StreamID)
 	buf.SetPayload(data)
 	return buf
+}
+
+func readCommand(r io.Reader) (Command, error) {
+	buf := make([]byte, MaxPacketSize)
+	n, err := r.Read(buf[0:2])
+	if err != nil || n != 2 {
+		return nil, err
+	}
+	size := int(binary.BigEndian.Uint16(buf))
+	offset := 0
+	if size > MaxPacketSize-2 {
+		return nil, errors.New("invalid packet size")
+	}
+	for {
+		n, err := r.Read(buf[offset+2 : size+2])
+		if err != nil {
+			return nil, err
+		}
+		offset += n
+		if size == offset {
+			return buf[:offset+2], nil
+		}
+	}
 }

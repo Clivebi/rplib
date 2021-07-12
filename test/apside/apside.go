@@ -30,5 +30,6 @@ func main() {
 		}
 		log.Println("connect " + *routeAddress + " success")
 		ap.Run()
+		ap.Close()
 	}
 }

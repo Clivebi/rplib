@@ -1,9 +1,8 @@
 package rplib
 
 import (
-	"bytes"
+	"container/list"
 	"crypto/md5"
-	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"io"
@@ -14,87 +13,105 @@ import (
 	"time"
 )
 
+type zcCache struct {
+	lock  sync.RWMutex
+	chunk []byte
+	pages *list.List
+}
+
+func (o *zcCache) Read(b []byte) (int, error) {
+	o.lock.Lock()
+	defer o.lock.Unlock()
+	if o.chunk == nil {
+		e := o.pages.Front()
+		if e == nil {
+			return 0, io.EOF
+		}
+		o.pages.Remove(e)
+		o.chunk = e.Value.([]byte)
+	}
+	copy(b, o.chunk)
+	n := len(b)
+	if n >= len(o.chunk) {
+		n = len(o.chunk)
+		o.chunk = nil
+	} else {
+		o.chunk = o.chunk[n:]
+	}
+	return n, nil
+}
+
+func (o *zcCache) Write(b []byte) (int, error) {
+	o.lock.Lock()
+	defer o.lock.Unlock()
+	o.pages.PushBack(b)
+	return len(b), nil
+}
+
+func (o *zcCache) IsEmpty() bool {
+	o.lock.Lock()
+	defer o.lock.Unlock()
+	return o.pages.Len() == 0 && o.chunk == nil
+}
+
 //RouteAPStream server side AP Stream
 type RouteAPStream struct {
 	isClosed      bool
-	closed        chan int
 	id            uint16
 	commandWriter CommandWriter
-	lock          sync.RWMutex
-	cache         *bytes.Buffer
-	w             chan []byte
+	cache         *zcCache
+	rCond         *sync.Cond
 }
 
 //NewRouteAPStream create instance of RouteAPStream
 func NewRouteAPStream(id uint16, commandWriter CommandWriter) *RouteAPStream {
 	return &RouteAPStream{
 		isClosed:      false,
-		closed:        make(chan int),
 		id:            id,
 		commandWriter: commandWriter,
-		lock:          sync.RWMutex{},
-		cache:         bytes.NewBuffer(nil),
-		w:             make(chan []byte, 64),
-	}
-}
-
-func (o *RouteAPStream) readFromCache(b []byte) (int, error) {
-	o.lock.Lock()
-	defer o.lock.Unlock()
-	if o.cache.Len() > 0 {
-		return o.cache.Read(b)
-	}
-	return 0, nil
-}
-
-func (o *RouteAPStream) readToCache() {
-	o.lock.Lock()
-	defer o.lock.Unlock()
-	if len(o.w) > 0 {
-		buf := <-o.w
-		o.cache.Write(buf)
+		cache: &zcCache{
+			chunk: nil,
+			pages: list.New(),
+			lock:  sync.RWMutex{},
+		},
+		rCond: sync.NewCond(&sync.RWMutex{}),
 	}
 }
 
 //Read implement io.Reader
 func (o *RouteAPStream) Read(b []byte) (int, error) {
-	n, err := o.readFromCache(b)
-	if n > 0 {
-		o.readToCache()
-		return n, err
+	o.rCond.L.Lock()
+	for o.cache.IsEmpty() {
+		o.rCond.Wait()
+		if o.isClosed {
+			o.rCond.L.Unlock()
+			return 0, io.EOF
+		}
 	}
-	select {
-	case buf := <-o.w:
-		o.lock.Lock()
-		o.cache.Write(buf)
-		o.lock.Unlock()
-		return o.readFromCache(b)
-	case <-o.closed:
-		return 0, io.EOF
-	}
+	n, err := o.cache.Read(b)
+	o.rCond.L.Unlock()
+	return n, err
 }
 
 //Write implement io.Write
 func (o *RouteAPStream) Write(b []byte) (int, error) {
 	cmd := DataCommand(b, o.id)
 	o.commandWriter.AsyncWriteCommand(cmd)
+	//logBufferHash("client write ", b)
 	return len(b), nil
 }
 
 func (o *RouteAPStream) close(sendException bool) {
-	o.lock.Lock()
 	if o.isClosed {
-		o.lock.Unlock()
+		o.rCond.Broadcast()
 		return
 	}
 	o.isClosed = true
-	o.lock.Unlock()
 	if sendException {
 		cmd := ExceptionCommand([]byte("EOF"), o.id)
 		o.commandWriter.AsyncWriteCommand(cmd)
 	}
-	close(o.closed)
-	close(o.w)
+	o.rCond.Broadcast()
 	return
 }
 
@@ -104,20 +121,9 @@ func (o *RouteAPStream) Close() error {
 	return nil
 }
 
-func (o *RouteAPStream) onPacketReceived(data []byte) {
-	o.lock.Lock()
-	defer o.lock.Unlock()
-	if o.isClosed {
-		return
-	}
-	for {
-		if len(o.w) <= 0 {
-			break
-		}
-		buf := <-o.w
-		o.cache.Write(buf)
-	}
-	o.w <- data
+func (o *RouteAPStream) onPacketArrived(data []byte) {
+	o.cache.Write(data)
+	o.rCond.Signal()
 }
 
 type waitResult struct {
@@ -147,6 +153,7 @@ type APConnection struct {
 func newAPConnection(con net.Conn, expireTimeout time.Duration) *APConnection {
 	c := &APConnection{
 		streamCount:   0,
+		isClosed:      false,
 		serverConn:    con,
 		streams:       map[uint16]*RouteAPStream{},
 		lock:          sync.RWMutex{},
@@ -181,7 +188,7 @@ func (o *APConnection) processLoop() {
 		if cmd == nil {
 			break
 		}
-		log.Println("process command:", cmd)
+		//log.Println("process command:", cmd)
 		o.processCommand(cmd)
 	}
 }
@@ -214,8 +221,9 @@ func (o *APConnection) processCommand(cmd Command) {
 		}
 	case CommandData:
 		stream := o.streams[cmd.StreamID()]
+		//logBufferHash("receive transfer data ", cmd.Payload())
 		if stream != nil {
-			stream.onPacketReceived(cmd.Payload())
+			stream.onPacketArrived(cmd.Payload())
 		}
 	case CommandException:
 		stream := o.streams[cmd.StreamID()]
@@ -235,21 +243,10 @@ func (o *APConnection) processCommand(cmd Command) {
 func (o *APConnection) readLoop() {
 	for {
 		o.serverConn.SetReadDeadline(time.Now().Add(o.expireTimeout))
-		buf := make([]byte, MaxPacketSize)
-		n, err := o.serverConn.Read(buf[:2])
-		if err != nil || n != 2 {
+		cmd, err := readCommand(o.serverConn)
+		if err != nil {
 			break
 		}
-		size := binary.BigEndian.Uint16(buf)
-		if size > MaxPacketSize {
-			log.Println("out of maxpacketsize")
-			break
-		}
-		n, err = o.serverConn.Read(buf[2 : 2+size])
-		if err != nil || n != int(size) {
-			break
-		}
-		cmd := (Command)(buf[:2+size])
 		o.rCmd <- cmd
 	}
 }
@@ -382,6 +379,9 @@ func (o *APManger) PickupConnection() *APConnection {
 	o.apConnsLock.Lock()
 	defer o.apConnsLock.Unlock()
 	size := len(o.apConns)
+	if size == 0 {
+		return nil
+	}
 	list := make([]*APConnection, size)
 	i := 0
 	for _, v := range o.apConns {
@@ -407,6 +407,7 @@ func (o *APManger) addConnection(key string, ac *APConnection) {
 
 //ServerNewConnection start serve new connection
 func (o *APManger) ServerNewConnection(con net.Conn, expireTimeout time.Duration, key string) {
+	defer con.Close()
 	old := o.removeConnection(key)
 	if old != nil {
 		old.Close()
@@ -527,7 +528,7 @@ func (o *Route) removeClientConnection(ctx *ClientContext) {
 }
 
 func (o *Route) copyIO(dst io.WriteCloser, src io.ReadCloser, ctx *ClientContext, send bool) {
-	buf := make([]byte, 1024*32)
+	buf := make([]byte, 4*1024)
 	defer dst.Close()
 	for {
 		n, err := src.Read(buf)

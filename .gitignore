@@ -1,2 +1,4 @@
 test/apside/apside
 test/server/serverside
+test/tcpclient/tcpclient
+test/tcpserver/tcpserver
