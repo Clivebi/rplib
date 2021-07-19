@@ -162,7 +162,10 @@ func readCommand(r io.Reader) (Command, error) {
 	size := int(binary.BigEndian.Uint16(buf))
 	offset := 0
 	if size > MaxPacketSize-2 {
-		return nil, errors.New("invalid packet size")
+		return nil, errors.New("packet size out of limit")
+	}
+	if size < payloadOffset+1 {
+		return nil, errors.New("packet too small")
 	}
 	for {
 		n, err := r.Read(buf[offset+2 : size+2])
