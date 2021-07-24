@@ -14,6 +14,8 @@ const (
 	req = "GET / HTTP/1.1\r\nHost: www.baidu.com\r\nUser-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36\r\nAccept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9\r\nAccept-Language: zh-CN,zh;q=0.9,en;q=0.8\r\nConnection: close\r\n\r\n"
 )
 
+var tq = rplib.NewTaskQueue(32)
+
 func TestWithIPAddressHeader(t *testing.T) {
 	route := rplib.Route{}
 	route.ServerAddress = "localhost:9000"
@@ -26,7 +28,7 @@ func TestWithIPAddressHeader(t *testing.T) {
 	defer route.Close()
 	time.Sleep(time.Second * 3) //wait route serve runing
 	// route request to www.baidu.com:80
-	ap, err := rplib.NewAP("localhost:9001", "www.baidu.com:80", time.Minute*4)
+	ap, err := rplib.NewAP("localhost:9001", "www.baidu.com:80", time.Minute*4, tq)
 	if err != nil {
 		t.Error(err)
 		return
@@ -59,7 +61,7 @@ func TestDirect(t *testing.T) {
 	defer route.Close()
 	time.Sleep(time.Second * 3) //wait route serve runing
 	// route request to www.baidu.com:80
-	ap, err := rplib.NewAP("localhost:9001", "www.baidu.com:80", time.Minute*4)
+	ap, err := rplib.NewAP("localhost:9001", "www.baidu.com:80", time.Minute*4, tq)
 	if err != nil {
 		t.Error(err)
 		return
@@ -96,7 +98,7 @@ func TestWithPolicy(t *testing.T) {
 	defer route.Close()
 	time.Sleep(time.Second * 3) //wait route serve runing
 	// route request to www.baidu.com:80
-	ap, err := rplib.NewAP("localhost:9001", "www.baidu.com:80", time.Minute*4)
+	ap, err := rplib.NewAP("localhost:9001", "www.baidu.com:80", time.Minute*4, tq)
 	if err != nil {
 		t.Error(err)
 		return
@@ -142,7 +144,7 @@ func TestAuth(t *testing.T) {
 	defer route.Close()
 	time.Sleep(time.Second * 3) //wait route serve runing
 	// route request to www.baidu.com:80
-	ap, err := rplib.NewAP("localhost:9001", "www.baidu.com:80", time.Minute*4)
+	ap, err := rplib.NewAP("localhost:9001", "www.baidu.com:80", time.Minute*4, tq)
 	if err != nil {
 		t.Error(err)
 		return

@@ -1,6 +1,7 @@
 package rplib
 
 import (
+	"bufio"
 	"container/list"
 	"crypto/md5"
 	"encoding/hex"
@@ -8,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
@@ -129,9 +131,9 @@ type APConnection struct {
 	streams       map[uint16]*RouteAPStream
 	lock          sync.RWMutex
 	waitQueue     map[string]*allocateWaitObject
-	wCmd          chan Command
 	rCmd          chan Command
 	expireTimeout time.Duration
+	tq            *TaskQueue
 }
 
 func newAPConnection(con net.Conn, expireTimeout time.Duration) *APConnection {
@@ -142,30 +144,29 @@ func newAPConnection(con net.Conn, expireTimeout time.Duration) *APConnection {
 		streams:       map[uint16]*RouteAPStream{},
 		lock:          sync.RWMutex{},
 		waitQueue:     map[string]*allocateWaitObject{},
-		wCmd:          make(chan Command, 1024),
-		rCmd:          make(chan Command, 1024),
+		tq:            nil,
+		rCmd:          make(chan Command, 32),
 		expireTimeout: expireTimeout,
 	}
 	go c.processLoop()
-	go c.writeLoop()
 	return c
 }
 
-func (o *APConnection) Close() error {
+func (o *APConnection) internalClose() {
 	o.lock.Lock()
 	defer o.lock.Unlock()
 	if o.isClosed {
-		return nil
+		return
 	}
 	o.isClosed = true
 	for _, v := range o.streams {
 		v.close(false)
 	}
 	close(o.rCmd)
-	go func() {
-		time.Sleep(time.Second * 10)
-		close(o.wCmd)
-	}()
+}
+
+func (o *APConnection) Close() error {
+	o.tq.PostTask(o.internalClose)
 	return nil
 }
 
@@ -233,9 +234,10 @@ func (o *APConnection) processCommand(cmd Command) {
 }
 
 func (o *APConnection) readLoop() {
+	br := bufio.NewReader(o.serverConn)
 	for {
 		o.serverConn.SetReadDeadline(time.Now().Add(o.expireTimeout))
-		cmd, err := readCommand(o.serverConn)
+		cmd, err := readCommand(br)
 		if err != nil {
 			if io.EOF.Error() != err.Error() {
 				log.Println(err)
@@ -246,30 +248,28 @@ func (o *APConnection) readLoop() {
 	}
 }
 
-func (o *APConnection) writeLoop() {
-	for {
-		cmd := <-o.wCmd
-		if cmd == nil || o.isClosed {
-			break
-		}
-		if cmd.Type() == CommandException {
-			o.rCmd <- CloneCommand(cmd)
-		}
-		//log.Println("write command:", cmd)
-		err := writeCommand(o.serverConn, cmd)
-		gPool.Release(cmd)
-		if err != nil {
-			break
-		}
+func (o *APConnection) internalWriteCommand(cmd Command) error {
+	if o.isClosed {
+		return net.ErrClosed
 	}
+	if cmd.Type() == CommandException {
+		o.rCmd <- CloneCommand(cmd)
+	}
+	//log.Println("write command:", cmd)
+	err := writeCommand(o.serverConn, cmd)
+	gPool.Release(cmd)
+	return err
 }
 
 //WriteCommand implement CommandWriter
 func (o *APConnection) WriteCommand(cmd Command) {
-	if o.isClosed {
-		return
-	}
-	o.wCmd <- cmd
+	o.tq.PostTask(func() {
+		err := o.internalWriteCommand(cmd)
+		if err != nil {
+			log.Println(err)
+			o.internalClose()
+		}
+	})
 }
 
 //StreamSize return count of stream on this connection
@@ -320,13 +320,16 @@ func (o *APConnection) AllocateStream(timeout time.Duration) (stream *RouteAPStr
 
 //APManger ap connection manger
 type APManger struct {
+	seed        int
 	apConnsLock sync.RWMutex
 	apConns     map[string]*APConnection
+	taskQs      []*TaskQueue
 }
 
 //NewAPManger new instance of APManger
 func NewAPManger() *APManger {
-	return &APManger{apConnsLock: sync.RWMutex{}, apConns: map[string]*APConnection{}}
+	apm := &APManger{seed: 0, apConnsLock: sync.RWMutex{}, apConns: map[string]*APConnection{}}
+	return apm
 }
 
 //ListKey get all connection keys
@@ -377,19 +380,35 @@ func (o *APManger) PickupMinimumStreamConnection() *APConnection {
 //PickupConnection random pickup APConnection
 func (o *APManger) PickupConnection() *APConnection {
 	index := (int)(time.Now().UnixNano() & 0xFFFFFF)
-	o.apConnsLock.Lock()
-	defer o.apConnsLock.Unlock()
-	size := len(o.apConns)
-	if size == 0 {
+	keys := o.ListKey()
+	if len(keys) == 0 {
 		return nil
 	}
-	list := make([]*APConnection, size)
-	i := 0
-	for _, v := range o.apConns {
-		list[i] = v
-		i++
+	sort.Strings(keys)
+	count := len(keys)
+	for {
+		con := o.LookupConnection(keys[index%len(keys)])
+		if con != nil {
+			return con
+		}
+		count--
+		if count == 0 {
+			return nil
+		}
 	}
-	return list[index%size]
+}
+
+func (o *APManger) extendTaskQueue(newSize int) {
+	newSize = (newSize / 10) + 10
+	if newSize < len(o.taskQs) {
+		return
+	}
+	newS := make([]*TaskQueue, newSize)
+	copy(newS, o.taskQs)
+	for i := len(o.taskQs); i < newSize; i++ {
+		newS[i] = NewTaskQueue(4 * 32)
+	}
+	o.taskQs = newS
 }
 
 func (o *APManger) removeConnection(key string) *APConnection {
@@ -403,7 +422,10 @@ func (o *APManger) removeConnection(key string) *APConnection {
 func (o *APManger) addConnection(key string, ac *APConnection) {
 	o.apConnsLock.Lock()
 	defer o.apConnsLock.Unlock()
+	o.extendTaskQueue((len(o.apConns) + 1) / 32)
 	o.apConns[key] = ac
+	ac.tq = o.taskQs[o.seed%len(o.taskQs)]
+	o.seed++
 }
 
 //ServerNewConnection start serve new connection
@@ -632,13 +654,11 @@ func (o *Route) serverConnectionHandler(con net.Conn) {
 	rc, err := o.selectRouteConnection(con)
 	if err != nil {
 		log.Println("select routeconnect failed:", err)
-		con.Close()
 		return
 	}
 	rs, err := rc.AllocateStream(time.Minute)
 	if err != nil {
 		log.Println("allocate stream failed:", err)
-		con.Close()
 		return
 	}
 	ctx := &ClientContext{ActiveTime: time.Now()}

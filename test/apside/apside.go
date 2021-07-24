@@ -21,9 +21,10 @@ func main() {
 		flag.Usage()
 		return
 	}
+	tq := rplib.NewTaskQueue(32)
 	for {
 		log.Println("try connect to " + *routeAddress)
-		ap, err := rplib.NewAP(*routeAddress, *backendAddress, time.Minute*4)
+		ap, err := rplib.NewAP(*routeAddress, *backendAddress, time.Minute*2, tq)
 		if err != nil {
 			time.Sleep(time.Second * 30)
 			continue

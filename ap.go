@@ -71,6 +71,7 @@ func (o *APStream) readLoop() {
 		if o.isClosed {
 			break
 		}
+		//log.Println("backend size:", n)
 		cmd := Command(buf)
 		BuildDataCommand(cmd, n, o.id)
 		o.commandWriter.WriteCommand(cmd)
@@ -79,22 +80,22 @@ func (o *APStream) readLoop() {
 
 //AP access point
 type AP struct {
-	AliveTick    time.Duration
+	isClosed     bool
+	echoTick     time.Duration
 	conn         net.Conn
 	nextStreamID uint16
 	lock         sync.RWMutex
 	streams      map[uint16]*APStream
 	backendAddr  string
-	wCmd         chan Command
+	tq           *TaskQueue
 	rCmd         chan Command
 }
 
-//Close close the access point
-func (o *AP) Close() error {
-	//step 1 raise readloop exit
-	//step 2 shutdown all stream
-	//step 3 raise processLoop exit
-	//step 4 raise writeloop exit
+func (o *AP) internalClose() {
+	if o.isClosed {
+		return
+	}
+	o.isClosed = true
 	o.conn.Close()
 	o.lock.Lock()
 	for _, v := range o.streams {
@@ -103,7 +104,13 @@ func (o *AP) Close() error {
 	o.streams = map[uint16]*APStream{}
 	o.lock.Unlock()
 	close(o.rCmd)
-	close(o.wCmd)
+}
+
+//Close close the access point
+func (o *AP) Close() error {
+	o.tq.PostTask(func() {
+		o.internalClose()
+	})
 	return nil
 }
 
@@ -184,7 +191,7 @@ func (o *AP) processCommand(cmd Command) {
 
 func (o *AP) readLoop() {
 	for {
-		o.conn.SetReadDeadline(time.Now().Add(o.AliveTick * 2))
+		o.conn.SetReadDeadline(time.Now().Add(o.echoTick * 2))
 		cmd, err := readCommand(o.conn)
 		if err != nil {
 			log.Println(err)
@@ -194,64 +201,71 @@ func (o *AP) readLoop() {
 	}
 }
 
-func (o *AP) writeLoop() {
-	ticker := time.NewTicker(o.AliveTick)
-	defer ticker.Stop()
-	for {
-		select {
-		case cmd := <-o.wCmd:
-			if cmd == nil {
-				return
-			}
-			//log.Println("write command:", cmd)
-			if cmd.Type() == CommandException {
-				o.rCmd <- CloneCommand(cmd)
-			}
-			err := writeCommand(o.conn, cmd)
-			gPool.Release(cmd)
-			if err != nil {
-				log.Println(err)
-				return
-			}
-		case <-ticker.C:
-			ec := gPool.Allocate()
-			BuildEchoCommand(ec, []byte{0x01}, 0)
-			err := writeCommand(o.conn, ec)
-			gPool.Release(ec)
-			if err != nil {
-				log.Println(err)
-				return
-			}
-		}
+func (o *AP) sendEcho() {
+	if o.isClosed {
+		return
 	}
+	cmd := gPool.Allocate()
+	BuildEchoCommand(cmd, []byte{0x01}, 0)
+	err := o.internalWriteCommand(cmd)
+	if err != nil {
+		log.Println(err)
+		o.internalClose()
+		return
+	}
+	o.tq.PostDelayTask(func() {
+		o.sendEcho()
+	}, o.echoTick)
+}
+
+func (o *AP) internalWriteCommand(cmd Command) error {
+	if o.isClosed {
+		return net.ErrClosed
+	}
+	if cmd.Type() == CommandException {
+		o.rCmd <- CloneCommand(cmd)
+	}
+	//log.Println("write command:", cmd)
+	err := writeCommand(o.conn, cmd)
+	gPool.Release(cmd)
+	return err
 }
 
 func (o *AP) WriteCommand(cmd Command) {
-	o.wCmd <- cmd
+	o.tq.PostTask(func() {
+		err := o.internalWriteCommand(cmd)
+		if err != nil {
+			log.Println(err)
+			o.internalClose()
+		}
+	})
 }
 
 //Run run the ap unitil catch some error
 func (o *AP) Run() {
 	go o.processLoop()
-	go o.writeLoop()
+	o.tq.PostDelayTask(func() {
+		o.sendEcho()
+	}, o.echoTick)
 	o.readLoop()
 }
 
 //NewAP create new AP instance
-func NewAP(routeAddress string, backendAddress string, aliveTick time.Duration) (*AP, error) {
+func NewAP(routeAddress string, backendAddress string, echoTick time.Duration, tq *TaskQueue) (*AP, error) {
 	con, err := net.Dial("tcp4", routeAddress)
 	if err != nil {
 		return nil, err
 	}
 	s := &AP{
-		AliveTick:    aliveTick,
+		isClosed:     false,
+		echoTick:     echoTick,
 		conn:         con,
 		nextStreamID: uint16(time.Now().Unix() & 0xFFF),
 		lock:         sync.RWMutex{},
 		streams:      map[uint16]*APStream{},
 		backendAddr:  backendAddress,
-		wCmd:         make(chan Command, 1024),
-		rCmd:         make(chan Command, 1024),
+		tq:           tq,
+		rCmd:         make(chan Command, 32),
 	}
 	return s, nil
 }

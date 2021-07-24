@@ -89,6 +89,7 @@ func (o Command) Payload() []byte {
 //String get the debug string
 func (o Command) String() string {
 	w := bytes.NewBuffer(nil)
+	fmt.Fprintf(w, "Size:%v ", o.Size())
 	fmt.Fprintf(w, "Type:")
 	switch o.Type() {
 	case CommandConnect:
@@ -183,31 +184,27 @@ func writeCommand(w io.Writer, cmd Command) error {
 }
 
 func readCommand(r io.Reader) (Command, error) {
-	buf := gPool.Allocate()
-	n, err := r.Read(buf[0:2])
+	raw := []byte(gPool.Allocate())
+	sizeBuf := raw[:2]
+	n, err := io.ReadFull(r, sizeBuf)
 	if err != nil || n != 2 {
-		gPool.Release(buf)
 		return nil, err
 	}
-	size := int(binary.BigEndian.Uint16(buf))
-	offset := 0
+	size := int(uint32(binary.BigEndian.Uint16(sizeBuf) & 0xFFFF))
 	if size > MaxPacketSize {
-		gPool.Release(buf)
 		return nil, errors.New("packet size out of limit: " + strconv.Itoa(int(size)))
 	}
 	if size < MinPacketSize {
-		gPool.Release(buf)
 		return nil, errors.New("packet too small")
 	}
-	for {
-		n, err := r.Read(buf[offset+2 : size+2])
-		if err != nil {
-			gPool.Release(buf)
-			return nil, err
-		}
-		offset += n
-		if size == offset {
-			return buf, nil
-		}
+	part := raw[2:]
+	body := part[:size]
+	n, err = io.ReadFull(r, body)
+	if err != nil {
+		return nil, err
 	}
+	if n != size {
+		return nil, io.ErrUnexpectedEOF
+	}
+	return Command(raw), nil
 }
