@@ -6,11 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 )
 
 const (
 	//MaxPacketSize the max packet size
-	MaxPacketSize = 8 * 1024
+	MaxPacketSize = commandCapSize - 2
+	//MinPacketSize the min packet size
+	MinPacketSize = 4 // command_type(byte)+stream_id(uint16)+payload(1)
 	//CommandConnect connect command used by route side
 	CommandConnect = byte(1)
 	//CommandConnectResponse connect response used by ap side
@@ -20,11 +23,12 @@ const (
 	//CommandException exception data packet route side & ap side
 	CommandException = byte(4)
 	//CommandEcho  heartbeat data packet ap side send,route side response
-	CommandEcho   = byte(5)
-	sizeOffset    = 0
-	typeOffset    = sizeOffset + 2
-	idOffset      = typeOffset + 1
-	payloadOffset = idOffset + 2
+	CommandEcho    = byte(5)
+	sizeOffset     = 0
+	typeOffset     = sizeOffset + 2
+	idOffset       = typeOffset + 1
+	payloadOffset  = idOffset + 2
+	commandCapSize = 8 * 1024
 )
 
 //Command command object struct
@@ -67,12 +71,19 @@ func (o Command) SetStreamID(id uint16) {
 
 //SetPayload set the payload field
 func (o Command) SetPayload(payload []byte) int {
-	return copy(o[payloadOffset:], payload)
+	return copy([]byte(o)[payloadOffset:], payload)
+}
+
+//PayloadSize get payload size
+func (o Command) PayloadSize() int {
+	size := int(o.Size()) - payloadOffset + typeOffset
+	return size
 }
 
 //Payload get the payload field
 func (o Command) Payload() []byte {
-	return o[payloadOffset:]
+	buf := o[payloadOffset:]
+	return buf[:o.PayloadSize()]
 }
 
 //String get the debug string
@@ -92,89 +103,111 @@ func (o Command) String() string {
 		fmt.Fprintf(w, " Echo")
 	}
 	fmt.Fprintf(w, " StreamID:%v", o.StreamID())
-	fmt.Fprintf(w, " PayloadSize:%v", len(o.Payload()))
+	fmt.Fprintf(w, " PayloadSize:%v\n", o.PayloadSize())
+	//fmt.Fprintf(w, "%s", hex.Dump(o.Payload()))
 	return w.String()
 }
 
-//ConnectCommand create one  connect command,the payload is the hash
-func ConnectCommand(hash []byte) Command {
-	buf := (Command)(make([]byte, len(hash)+payloadOffset))
+//CloneCommand clone one command object
+func CloneCommand(cmd Command) Command {
+	ne := gPool.Allocate()
+	copy(ne, cmd[:commandCapSize])
+	return ne
+}
+
+//BuildConnectCommand create one  connect command,the payload is the hash
+func BuildConnectCommand(buf Command, hash []byte) {
 	buf.SetSize((uint16)(payloadOffset + len(hash) - typeOffset))
 	buf.SetType(CommandConnect)
 	buf.SetStreamID(0)
 	buf.SetPayload(hash)
-	return buf
 }
 
 //ConnectResponseCommand create connect response command
 //the payload = error_code(byte)+hash(receive from the connect command)
 // error_code == 0 for success
 // if error_code == 0,stream id include ap allocate stream ID
-func ConnectResponseCommand(hash []byte, StreamID uint16, errorCode byte) Command {
+func BuildConnectResponseCommand(buf Command, hash []byte, StreamID uint16, errorCode byte) {
+	raw := []byte(buf)
 	dataSize := len(hash) + 1
-	raw := make([]byte, dataSize+payloadOffset)
-	buf := (Command)(raw)
 	buf.SetSize((uint16)(payloadOffset + dataSize - typeOffset))
 	buf.SetType(CommandConnectResponse)
 	buf.SetStreamID(StreamID)
 	raw[payloadOffset] = errorCode
 	copy(raw[payloadOffset+1:], hash)
-	return buf
 }
 
-//DataCommand create data command
-func DataCommand(data []byte, StreamID uint16) Command {
-	buf := (Command)(make([]byte, len(data)+payloadOffset))
-	buf.SetSize((uint16)(payloadOffset + len(data) - typeOffset))
+//BuildDataCommand create data command
+func BuildDataCommand(buf Command, size int, StreamID uint16) {
+	buf.SetSize((uint16)(payloadOffset + size - typeOffset))
 	buf.SetType(CommandData)
 	buf.SetStreamID(StreamID)
-	buf.SetPayload(data)
-	return buf
 }
 
-//EchoCommand create echo data command
-func EchoCommand(data []byte, StreamID uint16) Command {
-	buf := (Command)(make([]byte, len(data)+payloadOffset))
+//BuildEchoCommand create echo data command
+func BuildEchoCommand(buf Command, data []byte, StreamID uint16) {
 	buf.SetSize((uint16)(payloadOffset + len(data) - typeOffset))
 	buf.SetType(CommandEcho)
 	buf.SetStreamID(StreamID)
 	buf.SetPayload(data)
-	return buf
 }
 
-//ExceptionCommand create exception command,
+//BuildExceptionCommand create exception command,
 //now,the data is the error object
-func ExceptionCommand(data []byte, StreamID uint16) Command {
-	buf := (Command)(make([]byte, len(data)+payloadOffset))
+func BuildExceptionCommand(buf Command, data []byte, StreamID uint16) {
 	buf.SetSize((uint16)(payloadOffset + len(data) - typeOffset))
 	buf.SetType(CommandException)
 	buf.SetStreamID(StreamID)
 	buf.SetPayload(data)
-	return buf
+}
+
+func writeBuffer(w io.Writer, buf []byte) error {
+	totalSize := len(buf)
+	writeSize := 0
+	for {
+		n, err := w.Write(buf[writeSize:])
+		if err != nil {
+			return err
+		}
+		writeSize += n
+		if writeSize == totalSize {
+			return nil
+		}
+	}
+}
+
+func writeCommand(w io.Writer, cmd Command) error {
+	totalSize := int(cmd.Size()) + 2
+	buf := []byte(cmd)[:totalSize]
+	return writeBuffer(w, buf)
 }
 
 func readCommand(r io.Reader) (Command, error) {
-	buf := make([]byte, MaxPacketSize)
+	buf := gPool.Allocate()
 	n, err := r.Read(buf[0:2])
 	if err != nil || n != 2 {
+		gPool.Release(buf)
 		return nil, err
 	}
 	size := int(binary.BigEndian.Uint16(buf))
 	offset := 0
-	if size > MaxPacketSize-2 {
-		return nil, errors.New("packet size out of limit")
+	if size > MaxPacketSize {
+		gPool.Release(buf)
+		return nil, errors.New("packet size out of limit: " + strconv.Itoa(int(size)))
 	}
-	if size < payloadOffset+1 {
+	if size < MinPacketSize {
+		gPool.Release(buf)
 		return nil, errors.New("packet too small")
 	}
 	for {
 		n, err := r.Read(buf[offset+2 : size+2])
 		if err != nil {
+			gPool.Release(buf)
 			return nil, err
 		}
 		offset += n
 		if size == offset {
-			return buf[:offset+2], nil
+			return buf, nil
 		}
 	}
 }

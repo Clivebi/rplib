@@ -12,23 +12,28 @@ const (
 )
 
 func Test_client(t *testing.T) {
-	ip := net.ParseIP("127.0.0.1").To4()
+	//ip := net.ParseIP("127.0.0.1").To4()
 	con, err := net.Dial("tcp", "localhost:9000")
 	if err != nil {
 		t.Error(err)
 		return
 	}
 	//write destIP (use witch ap(access point))
-	con.Write([]byte(ip))
+	//con.Write([]byte(ip))
 	buf := make([]byte, 4096)
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 3; i++ {
 		con.Write([]byte(req))
-		con.Read(buf)
-		fmt.Println(string(buf))
+		n, _ := con.Read(buf)
+		fmt.Print(string(buf[:n]))
 		time.Sleep(time.Second * 10)
 	}
 	fmt.Println("wait for remote server close")
-	_, err = con.Read(buf)
-	fmt.Println("remote server closed:", err)
-	time.Sleep(time.Minute * 10)
+	for {
+		n, err := con.Read(buf)
+		if err != nil {
+			fmt.Println("remote server closed:", err)
+			break
+		}
+		fmt.Print(string(buf[n]))
+	}
 }

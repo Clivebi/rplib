@@ -1,9 +1,7 @@
 package main
 
 import (
-	"crypto/md5"
 	"encoding/binary"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -67,8 +65,8 @@ func echo_handler(con net.Conn) {
 			fmt.Println(err)
 			break
 		}
-		sh := md5.Sum(buf)
-		fmt.Println("packet i=", i, " size=", len(buf), " hash=", hex.EncodeToString(sh[:]))
+		//sh := md5.Sum(buf)
+		//fmt.Println("packet i=", i, " size=", len(buf), " hash=", hex.EncodeToString(sh[:]))
 		write_packet(buf, con)
 		i++
 	}

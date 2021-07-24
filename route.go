@@ -15,43 +15,24 @@ import (
 
 type zcCache struct {
 	lock  sync.RWMutex
-	chunk []byte
 	pages *list.List
 }
 
-func (o *zcCache) Read(b []byte) (int, error) {
-	o.lock.Lock()
-	defer o.lock.Unlock()
-	if o.chunk == nil {
-		e := o.pages.Front()
-		if e == nil {
-			return 0, io.EOF
-		}
-		o.pages.Remove(e)
-		o.chunk = e.Value.([]byte)
+func (o *zcCache) Get() (Command, error) {
+	e := o.pages.Front()
+	if e == nil {
+		return nil, io.EOF
 	}
-	copy(b, o.chunk)
-	n := len(b)
-	if n >= len(o.chunk) {
-		n = len(o.chunk)
-		o.chunk = nil
-	} else {
-		o.chunk = o.chunk[n:]
-	}
-	return n, nil
+	o.pages.Remove(e)
+	return e.Value.(Command), nil
 }
 
-func (o *zcCache) Write(b []byte) (int, error) {
-	o.lock.Lock()
-	defer o.lock.Unlock()
-	o.pages.PushBack(b)
-	return len(b), nil
+func (o *zcCache) Put(cmd Command) {
+	o.pages.PushBack(cmd)
 }
 
 func (o *zcCache) IsEmpty() bool {
-	o.lock.Lock()
-	defer o.lock.Unlock()
-	return o.pages.Len() == 0 && o.chunk == nil
+	return o.pages.Len() == 0
 }
 
 //RouteAPStream server side AP Stream
@@ -65,40 +46,39 @@ type RouteAPStream struct {
 
 //NewRouteAPStream create instance of RouteAPStream
 func NewRouteAPStream(id uint16, commandWriter CommandWriter) *RouteAPStream {
+	cache := &zcCache{
+		pages: list.New(),
+		lock:  sync.RWMutex{},
+	}
 	return &RouteAPStream{
 		isClosed:      false,
 		id:            id,
 		commandWriter: commandWriter,
-		cache: &zcCache{
-			chunk: nil,
-			pages: list.New(),
-			lock:  sync.RWMutex{},
-		},
-		rCond: sync.NewCond(&sync.RWMutex{}),
+		cache:         cache,
+		rCond:         sync.NewCond(&cache.lock),
 	}
 }
 
-//Read implement io.Reader
-func (o *RouteAPStream) Read(b []byte) (int, error) {
+func (o *RouteAPStream) ReadCommand() (Command, error) {
 	o.rCond.L.Lock()
 	for o.cache.IsEmpty() {
 		o.rCond.Wait()
 		if o.isClosed {
 			o.rCond.L.Unlock()
-			return 0, io.EOF
+			return nil, io.EOF
 		}
 	}
-	n, err := o.cache.Read(b)
+	n, err := o.cache.Get()
 	o.rCond.L.Unlock()
 	return n, err
 }
 
-//Write implement io.Write
-func (o *RouteAPStream) Write(b []byte) (int, error) {
-	cmd := DataCommand(b, o.id)
-	o.commandWriter.AsyncWriteCommand(cmd)
-	//logBufferHash("client write ", b)
-	return len(b), nil
+func (o *RouteAPStream) WriteCommand(cmd Command) error {
+	if o.isClosed {
+		return io.EOF
+	}
+	o.commandWriter.WriteCommand(cmd)
+	return nil
 }
 
 func (o *RouteAPStream) close(sendException bool) {
@@ -108,8 +88,9 @@ func (o *RouteAPStream) close(sendException bool) {
 	}
 	o.isClosed = true
 	if sendException {
-		cmd := ExceptionCommand([]byte("EOF"), o.id)
-		o.commandWriter.AsyncWriteCommand(cmd)
+		cmd := gPool.Allocate()
+		BuildExceptionCommand(cmd, []byte("EOF"), o.id)
+		o.commandWriter.WriteCommand(cmd)
 	}
 	o.rCond.Broadcast()
 	return
@@ -121,11 +102,14 @@ func (o *RouteAPStream) Close() error {
 	return nil
 }
 
-func (o *RouteAPStream) onPacketArrived(data []byte) {
-	o.cache.Write(data)
+func (o *RouteAPStream) onDataCommand(cmd Command) {
+	o.rCond.L.Lock()
+	o.cache.Put(cmd)
 	o.rCond.Signal()
+	o.rCond.L.Unlock()
 }
 
+//allocate stream wait object
 type waitResult struct {
 	code   byte
 	stream *RouteAPStream
@@ -177,15 +161,18 @@ func (o *APConnection) Close() error {
 	for _, v := range o.streams {
 		v.close(false)
 	}
-	close(o.wCmd)
 	close(o.rCmd)
+	go func() {
+		time.Sleep(time.Second * 10)
+		close(o.wCmd)
+	}()
 	return nil
 }
 
 func (o *APConnection) processLoop() {
 	for {
 		cmd := <-o.rCmd
-		if cmd == nil {
+		if cmd == nil || o.isClosed {
 			break
 		}
 		//log.Println("process command:", cmd)
@@ -207,6 +194,7 @@ func (o *APConnection) processCommand(cmd Command) {
 		delete(o.waitQueue, hashText)
 		o.lock.Unlock()
 		if waitObject == nil {
+			gPool.Release(cmd)
 			break
 		}
 		if code == 0 {
@@ -219,11 +207,14 @@ func (o *APConnection) processCommand(cmd Command) {
 			code:   code,
 			stream: stream,
 		}
+		gPool.Release(cmd)
 	case CommandData:
 		stream := o.streams[cmd.StreamID()]
 		//logBufferHash("receive transfer data ", cmd.Payload())
 		if stream != nil {
-			stream.onPacketArrived(cmd.Payload())
+			stream.onDataCommand(cmd)
+		} else {
+			gPool.Release(cmd)
 		}
 	case CommandException:
 		stream := o.streams[cmd.StreamID()]
@@ -233,8 +224,9 @@ func (o *APConnection) processCommand(cmd Command) {
 			o.streamCount--
 		}
 		log.Println("remove stream:", cmd.StreamID())
+		gPool.Release(cmd)
 	case CommandEcho:
-		o.AsyncWriteCommand(cmd)
+		o.WriteCommand(cmd)
 	default:
 		log.Println("invalid command type")
 	}
@@ -245,6 +237,9 @@ func (o *APConnection) readLoop() {
 		o.serverConn.SetReadDeadline(time.Now().Add(o.expireTimeout))
 		cmd, err := readCommand(o.serverConn)
 		if err != nil {
+			if io.EOF.Error() != err.Error() {
+				log.Println(err)
+			}
 			break
 		}
 		o.rCmd <- cmd
@@ -254,21 +249,26 @@ func (o *APConnection) readLoop() {
 func (o *APConnection) writeLoop() {
 	for {
 		cmd := <-o.wCmd
-		if cmd == nil {
+		if cmd == nil || o.isClosed {
 			break
 		}
 		if cmd.Type() == CommandException {
-			o.rCmd <- cmd
+			o.rCmd <- CloneCommand(cmd)
 		}
-		_, err := o.serverConn.Write([]byte(cmd))
+		//log.Println("write command:", cmd)
+		err := writeCommand(o.serverConn, cmd)
+		gPool.Release(cmd)
 		if err != nil {
 			break
 		}
 	}
 }
 
-//AsyncWriteCommand implement CommandWriter
-func (o *APConnection) AsyncWriteCommand(cmd Command) {
+//WriteCommand implement CommandWriter
+func (o *APConnection) WriteCommand(cmd Command) {
+	if o.isClosed {
+		return
+	}
 	o.wCmd <- cmd
 }
 
@@ -296,8 +296,9 @@ func (o *APConnection) AllocateStream(timeout time.Duration) (stream *RouteAPStr
 			o.lock.Unlock()
 		})
 	}
-	cmd := ConnectCommand(hash[:])
-	o.AsyncWriteCommand(cmd)
+	cmd := gPool.Allocate()
+	BuildConnectCommand(cmd, hash[:])
+	o.WriteCommand(cmd)
 	select {
 	case <-waitObject.exit:
 		err = errors.New("allocate stream timeout")
@@ -527,25 +528,41 @@ func (o *Route) removeClientConnection(ctx *ClientContext) {
 	delete(o.clients, ctx.addr)
 }
 
-func (o *Route) copyIO(dst io.WriteCloser, src io.ReadCloser, ctx *ClientContext, send bool) {
-	buf := make([]byte, 4*1024)
+func (o *Route) proxyClientToAP(aps *RouteAPStream, src io.Reader, ctx *ClientContext) {
+	defer aps.Close()
+	for {
+		buf := gPool.Allocate()
+		n, err := src.Read(buf[payloadOffset:])
+		if err != nil {
+			break
+		}
+		cmd := Command(buf)
+		BuildDataCommand(cmd, n, aps.id)
+		err = aps.WriteCommand(cmd)
+		if err != nil {
+			break
+		}
+		ctx.tempRecv += int64(n)
+		ctx.RecvBytes += int64(n)
+		ctx.ActiveTime = time.Now()
+	}
+}
+
+func (o *Route) proxyAPtoClient(aps *RouteAPStream, dst io.WriteCloser, ctx *ClientContext) {
 	defer dst.Close()
 	for {
-		n, err := src.Read(buf)
+		cmd, err := aps.ReadCommand()
 		if err != nil {
 			break
 		}
-		_, err = dst.Write(buf[:n])
+		n := cmd.PayloadSize()
+		err = writeBuffer(dst, cmd.Payload())
+		gPool.Release(cmd)
 		if err != nil {
 			break
 		}
-		if send {
-			ctx.tempSend += int64(n)
-			ctx.SendBytes += int64(n)
-		} else {
-			ctx.tempRecv += int64(n)
-			ctx.RecvBytes += int64(n)
-		}
+		ctx.tempSend += int64(n)
+		ctx.SendBytes += int64(n)
 		ctx.ActiveTime = time.Now()
 	}
 }
@@ -627,8 +644,8 @@ func (o *Route) serverConnectionHandler(con net.Conn) {
 	ctx := &ClientContext{ActiveTime: time.Now()}
 	ctx.conn = con
 	o.addClientConnection(ctx)
-	go o.copyIO(con, rs, ctx, false)
-	o.copyIO(rs, con, ctx, true)
+	go o.proxyAPtoClient(rs, con, ctx)
+	o.proxyClientToAP(rs, con, ctx)
 	o.removeClientConnection(ctx)
 }
 
@@ -645,6 +662,7 @@ func (o *Route) Close() error {
 
 //Run the route unitil catch some error
 func (o *Route) Run() {
+	gPool.count = 1000
 	o.apConnsLock = sync.RWMutex{}
 	o.apConns = map[string]*APConnection{}
 	o.clientsLock = sync.RWMutex{}

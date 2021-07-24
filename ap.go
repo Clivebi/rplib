@@ -13,7 +13,7 @@ import (
 //}
 
 type CommandWriter interface {
-	AsyncWriteCommand(cmd Command)
+	WriteCommand(cmd Command)
 }
 
 //APStream access point side stream
@@ -21,7 +21,7 @@ type APStream struct {
 	isClosed      bool
 	id            uint16
 	backend       net.Conn
-	w             chan []byte
+	w             chan Command
 	commandWriter CommandWriter
 }
 
@@ -39,25 +39,20 @@ func (o *APStream) exception(err error) {
 	if o.isClosed {
 		return
 	}
-	cmd := ExceptionCommand([]byte(err.Error()), o.id)
-	o.commandWriter.AsyncWriteCommand(cmd)
-}
-
-func (o *APStream) dataArrived(data []byte) {
-	if o.isClosed {
-		return
-	}
-	cmd := DataCommand(data, o.id)
-	o.commandWriter.AsyncWriteCommand(cmd)
+	cmd := Command(gPool.Allocate())
+	BuildExceptionCommand(cmd, []byte(err.Error()), o.id)
+	o.commandWriter.WriteCommand(cmd)
 }
 
 func (o *APStream) writeLoop() {
 	for {
-		data := <-o.w
-		if data == nil {
+		cmd := <-o.w
+		if cmd == nil {
 			break
 		}
-		_, err := o.backend.Write(data)
+		//log.Println("write to backend:", cmd)
+		err := writeBuffer(o.backend, cmd.Payload())
+		gPool.Release(cmd)
 		if err != nil {
 			o.exception(err)
 			break
@@ -67,14 +62,18 @@ func (o *APStream) writeLoop() {
 
 func (o *APStream) readLoop() {
 	for {
-		buf := make([]byte, 4*1024)
-		n, err := o.backend.Read(buf)
+		buf := gPool.Allocate()
+		n, err := o.backend.Read(buf[payloadOffset:])
 		if err != nil {
 			o.exception(err)
 			break
 		}
-		//logBufferHash("server write:", buf[:n])
-		o.dataArrived(buf[:n])
+		if o.isClosed {
+			break
+		}
+		cmd := Command(buf)
+		BuildDataCommand(cmd, n, o.id)
+		o.commandWriter.WriteCommand(cmd)
 	}
 }
 
@@ -122,14 +121,16 @@ func (o *AP) processLoop() {
 func (o *AP) processConnect(cmd Command, id uint16) {
 	backendConn, err := net.Dial("tcp", o.backendAddr)
 	if err != nil {
-		rsp := ConnectResponseCommand(cmd.Payload(), 0, 1)
-		o.AsyncWriteCommand(rsp)
+		rsp := gPool.Allocate()
+		BuildConnectResponseCommand(rsp, cmd.Payload(), 0, 1)
+		o.WriteCommand(rsp)
+		gPool.Release(cmd)
 		return
 	}
 	stream := &APStream{
 		id:            id,
 		backend:       backendConn,
-		w:             make(chan []byte, 64),
+		w:             make(chan Command, 64),
 		commandWriter: o,
 	}
 	log.Println("allocate stream:", id)
@@ -138,8 +139,10 @@ func (o *AP) processConnect(cmd Command, id uint16) {
 	o.lock.Unlock()
 
 	go stream.readLoop()
-	rsp := ConnectResponseCommand(cmd.Payload(), id, 0)
-	o.AsyncWriteCommand(rsp)
+	rsp := gPool.Allocate()
+	BuildConnectResponseCommand(rsp, cmd.Payload(), id, 0)
+	o.WriteCommand(rsp)
+	gPool.Release(cmd)
 	stream.writeLoop()
 }
 
@@ -159,7 +162,7 @@ func (o *AP) processCommand(cmd Command) {
 		st := o.lookupStream(cmd.StreamID())
 		//logBufferHash("receive transfer data ", cmd.Payload())
 		if st != nil {
-			st.w <- cmd.Payload()
+			st.w <- cmd
 		}
 	case CommandException:
 		st := o.lookupStream(cmd.StreamID())
@@ -170,7 +173,9 @@ func (o *AP) processCommand(cmd Command) {
 			st.Close()
 			log.Println("remove stream:", cmd.StreamID())
 		}
+		gPool.Release(cmd)
 	case CommandEcho:
+		gPool.Release(cmd)
 		break
 	default:
 		log.Println("invalid command type")
@@ -198,24 +203,30 @@ func (o *AP) writeLoop() {
 			if cmd == nil {
 				return
 			}
+			//log.Println("write command:", cmd)
 			if cmd.Type() == CommandException {
-				o.rCmd <- cmd
+				o.rCmd <- CloneCommand(cmd)
 			}
-			_, err := o.conn.Write([]byte(cmd))
+			err := writeCommand(o.conn, cmd)
+			gPool.Release(cmd)
 			if err != nil {
+				log.Println(err)
 				return
 			}
 		case <-ticker.C:
-			ec := EchoCommand([]byte{0x01}, 0)
-			_, err := o.conn.Write([]byte(ec))
+			ec := gPool.Allocate()
+			BuildEchoCommand(ec, []byte{0x01}, 0)
+			err := writeCommand(o.conn, ec)
+			gPool.Release(ec)
 			if err != nil {
+				log.Println(err)
 				return
 			}
 		}
 	}
 }
 
-func (o *AP) AsyncWriteCommand(cmd Command) {
+func (o *AP) WriteCommand(cmd Command) {
 	o.wCmd <- cmd
 }
 

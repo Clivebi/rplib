@@ -12,6 +12,7 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"time"
 )
 
 func rand_buffer(b []byte, max_size int) int {
@@ -82,11 +83,12 @@ func main() {
 		return
 	}
 	defer con.Close()
-	buf := make([]byte, 32*1024)
-	for i := 0; i < 1000; i++ {
-		size := rand_buffer(buf, 32*1024)
+	buf := make([]byte, 64*1024)
+	exp := time.Now()
+	for i := 0; i < 10000; i++ {
+		size := rand_buffer(buf, 64*1024)
 		sh := md5.Sum(buf[:size])
-		fmt.Println("write packet size=", size, "hash=", hex.EncodeToString(sh[:]))
+		//fmt.Println("write packet size=", size, "hash=", hex.EncodeToString(sh[:]))
 		err := write_packet(buf[:size], con)
 		if err != nil {
 			fmt.Println(err, i)
@@ -108,5 +110,5 @@ func main() {
 			break
 		}
 	}
-	fmt.Println("test complete")
+	fmt.Println("test complete, time=", time.Now().Sub(exp))
 }
