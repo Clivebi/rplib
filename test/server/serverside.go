@@ -31,7 +31,7 @@ func main() {
 	route.RouteAddress = *routeAddress
 	route.ClientExpireTimeoutSecond = *clientExpireTimeout
 	route.ReadTimeoutSecond = *readTimeout
-	route.ServerExpireTimeoutSecond = 8 * 60
+	route.ServerExpireTimeoutSecond = 6 * 60
 	if *multiMode {
 		route.Hijack(&rplib.ProtocolSelectorHijack{})
 	}
