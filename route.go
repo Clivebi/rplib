@@ -134,6 +134,7 @@ type APConnection struct {
 	rCmd          chan Command
 	expireTimeout time.Duration
 	tq            *TaskQueue
+	birthTime     time.Time
 }
 
 func newAPConnection(con net.Conn, expireTimeout time.Duration) *APConnection {
@@ -147,6 +148,7 @@ func newAPConnection(con net.Conn, expireTimeout time.Duration) *APConnection {
 		tq:            nil,
 		rCmd:          make(chan Command, 32),
 		expireTimeout: expireTimeout,
+		birthTime:     time.Now(),
 	}
 	go c.processLoop()
 	return c
@@ -203,7 +205,7 @@ func (o *APConnection) processCommand(cmd Command) {
 			o.streams[cmd.StreamID()] = stream
 			o.streamCount++
 		}
-		log.Println("allocate stream:", cmd.StreamID(), " error code:", code)
+		log.Println(o.serverConn.RemoteAddr(), " allocate stream:", cmd.StreamID(), " error code:", code)
 		waitObject.result <- waitResult{
 			code:   code,
 			stream: stream,
@@ -224,7 +226,7 @@ func (o *APConnection) processCommand(cmd Command) {
 			delete(o.streams, cmd.StreamID())
 			o.streamCount--
 		}
-		log.Println("remove stream:", cmd.StreamID())
+		log.Println(o.serverConn.RemoteAddr(), " remove stream:", cmd.StreamID())
 		gPool.Release(cmd)
 	case CommandEcho:
 		o.WriteCommand(cmd)
@@ -439,7 +441,7 @@ func (o *APManger) ServerNewConnection(con net.Conn, expireTimeout time.Duration
 	rc := newAPConnection(con, expireTimeout)
 	o.addConnection(key, rc)
 	rc.readLoop()
-	log.Println("remove RouteConnection:", con.RemoteAddr().String())
+	log.Println("remove RouteConnection:", con.RemoteAddr().String(), " alive time:", int64(time.Now().Sub(rc.birthTime)/time.Second))
 	o.removeConnection(key)
 	rc.Close()
 }
